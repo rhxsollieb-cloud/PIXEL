@@ -97,7 +97,7 @@ export function FieldEditor({field,value,schema,disabled = false,onCommit,onOpen
         <option value="default">模型默认</option><option value="custom">自定义</option>
       </PixelSelect>}
       {value !== null && <div className="field-object" tabIndex={0} role="group" aria-label={`进入${fieldLabel(field)}`} onDoubleClick={onOpen} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();onOpen();}}}>
-        <span><PixelIcon name="folder"/> {fieldLabel(field)}</span><span>{count} 项 · 双击进入 <PixelIcon name="chevron-right"/></span>
+        <span><PixelIcon name="folder"/> {fieldLabel(field)}</span><span>{count} 项 <PixelIcon name="chevron-right"/></span>
       </div>}
     </PixelField>;
   }
@@ -115,10 +115,10 @@ export function FieldEditor({field,value,schema,disabled = false,onCommit,onOpen
   const arrayValue = Array.isArray(value) && !field.children ? value.join('\n') : draft;
   return <PixelField label={fieldLabel(field)} htmlFor={id} {...(description ? {description}: {})} {...(error ? {error}: {})}>
     {multiline ? <PixelTextarea id={id} disabled={disabled} value={field.valueType === 'array' && draft === initial ? arrayValue : draft} rows={field.valueType === 'array' ? 3:5}
-      placeholder={field.valueType === 'array'?'每行一种风格':'写下你希望创作的内容…'}
+      placeholder=""
       onChange={event=>setDraft(event.target.value)} onBlur={()=>{void save();}} onKeyDown={keyDown}/>
       : <PixelInput id={id} disabled={disabled} type={field.valueType === 'number'?'number':'text'} step={field.valueType === 'number'?'any':undefined}
-        value={draft} placeholder={field.nullable?'自动':field.key==='voiceId'?'填写账户可用的声音 ID':''}
+        value={draft} placeholder={field.nullable?'自动':''}
         onChange={event=>setDraft(event.target.value)} onBlur={()=>{void save();}} onKeyDown={keyDown}/>}
   </PixelField>;
 }

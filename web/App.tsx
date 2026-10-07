@@ -32,7 +32,7 @@ function MediaPreview({asset,large = false}: {asset:DeepReadonly<AssetData>;larg
     onKeyDown={event=>{if(event.key===' '){event.preventDefault();play();}}}>
     {asset.kind === 'video' ? <video ref={element=>{ref.current=element;}} src={assetUrl(asset.id)} preload="metadata" onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)}/>
       : <><audio ref={element=>{ref.current=element;}} src={assetUrl(asset.id)} preload="metadata" onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)}/><div className="audio-art"><PixelIcon name="music"/>{Array.from({length:27},(_,i)=><i key={i} style={{height:`${12+(i*37%86)}px`}}/>)}</div></>}
-    {large && <span className="media-playback__hint">空格 · {playing?'暂停':'播放'}</span>}
+
   </div>;
 }
 
@@ -50,7 +50,7 @@ export function App() {
   const [connected,setConnected]=useState(false);
   const [providers,setProviders]=useState({elevenlabs:false,openrouter:false});
   const [pending,setPending]=useState(0);
-  const [feedback,setFeedback]=useState({text:'双击进入详情 · 右键发现动作 · 拖拽建立关系',error:false});
+  const [feedback,setFeedback]=useState({text:'',error:false});
   const [selected,setSelected]=useState<ObjectRef | undefined>();
   const [menu,setMenu]=useState<{x:number;y:number;items:PixelContextMenuItem[]} | undefined>();
   const [filter,setFilter]=useState('all');
@@ -89,7 +89,7 @@ export function App() {
         void store.refresh().catch(()=>{});
         void bridge.models(controller.signal).then(result=>setModels(result.items)).catch(()=>{});
         void bridge.status(controller.signal).then(status=>setProviders(status.providers)).catch(()=>{});
-        setFeedback(previous=>previous.text.includes('连接')?{text:'双击进入详情 · 右键发现动作 · 拖拽建立关系',error:false}:previous);
+        setFeedback(previous=>previous.text.includes('连接')?{text:'',error:false}:previous);
       }
     });
     void store.start().catch(()=>setFeedback({text:'后端尚未连接，请使用 npm run dev 启动工作台',error:true}));
@@ -114,7 +114,7 @@ export function App() {
       const result=await client.execute({requestId:crypto.randomUUID(),projectId:PROJECT_ID,expectedRevision:latest.revision,type,payload});
       await store.refresh();
       if(!result.ok){setFeedback({text:result.error.message,error:true});return false;}
-      setFeedback({text:type==='generation.submit'?'生成任务已提交，进度将显示在片段上':'已保存',error:false});
+      setFeedback({text:type==='generation.submit'?'生成任务已提交':'已保存',error:false});
       if(typeof result.outcome.itemId==='string' && type==='timeline.create')setSelected({kind:'item',projectId:PROJECT_ID,id:result.outcome.itemId});
       return true;
     }catch{setFeedback({text:'本地连接中断，修改尚未确认，请检查后端状态',error:true});return false;}
@@ -220,7 +220,7 @@ export function App() {
     if(object.kind==='project')return <div className="details-stack">
       <PixelField label="作品名称"><TitleField title={document.title} onCommit={title=>execute('project.title',{title},scope)}/></PixelField>
       <p className="pixel-description">{timelines.length} 条时间线 · {Object.keys(document.items).length} 个片段 · {allAssets.length} 份素材</p>
-      {timelines.map(timeline=><div key={timeline.id} className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'timeline',id:timeline.id,projectId:PROJECT_ID},scope)} onKeyDown={event=>objectKeys(event,{kind:'timeline',id:timeline.id,projectId:PROJECT_ID},scope)}><PixelIcon name="timeline"/>{shortModel(models.find(model=>model.modelId===timeline.modelId))}<span>双击进入 <PixelIcon name="chevron"/></span></div>)}
+      {timelines.map(timeline=><div key={timeline.id} className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'timeline',id:timeline.id,projectId:PROJECT_ID},scope)} onKeyDown={event=>objectKeys(event,{kind:'timeline',id:timeline.id,projectId:PROJECT_ID},scope)}><PixelIcon name="timeline"/>{shortModel(models.find(model=>model.modelId===timeline.modelId))}<span><PixelIcon name="chevron"/></span></div>)}
     </div>;
     if(object.kind==='asset'){
       const asset=document.assets[object.id];if(!asset)return null;
@@ -255,12 +255,12 @@ export function App() {
           ...(index!==undefined?[{id:'remove',label:'移除这个段落',disabled:array.length<=1,...(array.length<=1?{description:'计划至少保留一个段落'}:{}),onSelect:()=>{void updateArray(array.filter((_,i)=>i!==index));}}]:[]),
         ]});
       };
-      return <div className="details-stack" onContextMenu={event=>rowMenu(event)}><p className="pixel-description">双击编辑段落 · 右键增加或移除段落</p>{array.map((record,index)=><div key={index} className="detail-link" tabIndex={0} onDoubleClick={()=>openField([...nestedPath,index])} onKeyDown={event=>{if(event.key==='Enter')openField([...nestedPath,index]);}} onContextMenu={event=>rowMenu(event,index)}><PixelBadge>段落 {String(index+1).padStart(2,'0')}</PixelBadge><span>{record && typeof record==='object'&&!Array.isArray(record)?`${Number(record.durationMs ?? 0)/1000} 秒 · ${String(record.text || '无歌词')}`:''}</span><PixelIcon name="chevron"/></div>)}</div>;
+      return <div className="details-stack" onContextMenu={event=>rowMenu(event)}>{array.map((record,index)=><div key={index} className="detail-link" tabIndex={0} onDoubleClick={()=>openField([...nestedPath,index])} onKeyDown={event=>{if(event.key==='Enter')openField([...nestedPath,index]);}} onContextMenu={event=>rowMenu(event,index)}><PixelBadge>段落 {String(index+1).padStart(2,'0')}</PixelBadge><span>{record && typeof record==='object'&&!Array.isArray(record)?`${Number(record.durationMs ?? 0)/1000} 秒 · ${String(record.text || '无歌词')}`:''}</span><PixelIcon name="chevron"/></div>)}</div>;
     }
     return <div className="details-stack" onContextMenu={event=>context(event,object as ObjectRef,scope)}>
       {!nestedPath.length && <>
-        <div className="detail-summary"><PixelBadge tone="green">{shortModel(model)}</PixelBadge><span className="pixel-description">{item?'片段参数':'时间线设置'} · 编辑完成后自动保存</span></div>
-        {item && <div className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'timeline',projectId:PROJECT_ID,id:timeline.id},scope)} onKeyDown={event=>objectKeys(event,{kind:'timeline',projectId:PROJECT_ID,id:timeline.id},scope)}><PixelIcon name="grid"/>模型与画面设置<span>双击进入 <PixelIcon name="chevron"/></span></div>}
+        <div className="detail-summary"><PixelBadge tone="green">{shortModel(model)}</PixelBadge><span className="pixel-description">{item?'片段参数':'时间线设置'}</span></div>
+        {item && <div className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'timeline',projectId:PROJECT_ID,id:timeline.id},scope)} onKeyDown={event=>objectKeys(event,{kind:'timeline',projectId:PROJECT_ID,id:timeline.id},scope)}><PixelIcon name="grid"/>模型与画面设置<span><PixelIcon name="chevron"/></span></div>}
       </>}
       {visibleFields.filter(field=>!field.visibleWhen||JSON.stringify(values[field.visibleWhen.field])===JSON.stringify(field.visibleWhen.equals)).map(field=>{
         const fieldPath=[...prefix,field.key];
@@ -271,10 +271,10 @@ export function App() {
       {item && !nestedPath.length && <>
         <div className={`reference-zone ${dragging?.source.role==='asset'?'reference-zone--active':''}`} data-testid="item-reference"
           onDragOver={event=>dragOver(event,refTarget(item.id),scope)} onDrop={event=>drop(event,refTarget(item.id),scope)}>
-          <span className="pixel-title"><PixelIcon name="reference"/> 参考素材</span><p className="pixel-description">{model.maxReferences?`将图片拖入片段引用区，最多 ${model.maxReferences} 张`:'该模型不接受参考素材'}</p>
+          <span className="pixel-title"><PixelIcon name="reference"/> 参考素材</span><p className="pixel-description">{model.maxReferences?`最多 ${model.maxReferences} 张`:'不接受参考素材'}</p>
           {item.referenceAssetIds.map(id=>{const asset=document.assets[id];return asset?<div key={id} className="reference-card" tabIndex={0} onDoubleClick={()=>open({kind:'asset',projectId:PROJECT_ID,id},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',projectId:PROJECT_ID,id},scope)} onContextMenu={event=>context(event,{kind:'asset',projectId:PROJECT_ID,id},scope)}><MediaPreview asset={asset}/><span>{String(asset.metadata.name ?? '参考图像')}</span></div>:null;})}
         </div>
-        {item.outputAssetId && <div className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'asset',id:item.outputAssetId!,projectId:PROJECT_ID},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',id:item.outputAssetId!,projectId:PROJECT_ID},scope)}><PixelIcon name="image"/>生成输出<span>双击查看 <PixelIcon name="chevron"/></span></div>}
+        {item.outputAssetId && <div className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'asset',id:item.outputAssetId!,projectId:PROJECT_ID},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',id:item.outputAssetId!,projectId:PROJECT_ID},scope)}><PixelIcon name="image"/>生成输出<span><PixelIcon name="chevron"/></span></div>}
         {latestJob(item.id) && <div className="job-detail"><PixelProgress value={latestJob(item.id)!.progress} label={stateTitles[latestJob(item.id)!.state] ?? '生成任务'}/>{latestJob(item.id)!.error&&<p className="pixel-description">{latestJob(item.id)!.error!.message}</p>}</div>}
       </>}
     </div>;
@@ -286,26 +286,26 @@ export function App() {
 
   return <div className="workbench" onDragEnd={()=>{setDragging(undefined);setDropHint(undefined);}}>
     <header className="app-header">
-      <div className="wordmark"><svg width="28" height="28" viewBox="0 0 7 7" shapeRendering="crispEdges" aria-hidden="true"><path d="M0 0h7v7H0z" fill="currentColor"/><path d="M2 1h4v4H4v1H2zm1 1v2h2V2z" fill="var(--pixel-green-soft)"/></svg><strong>PIXEL</strong><span className="pixel-description">生成创作工作台</span></div>
-      <div className="project-name" tabIndex={0} role="group" aria-label="作品详情" onDoubleClick={()=>open(projectRef)} onKeyDown={event=>objectKeys(event,projectRef)}><PixelIcon name="folder"/>{document?.title ?? '正在打开作品'}<span className="pixel-description">双击查看</span></div>
-      <div className="header-status"><span className={`status-dot ${connected?'status-dot--online':''}`}/><span>{connected?'本地已连接':'等待连接'}</span><PixelBadge>工作区 01</PixelBadge></div>
+      <div className="wordmark"><svg width="28" height="28" viewBox="0 0 7 7" shapeRendering="crispEdges" aria-hidden="true"><path d="M0 0h7v7H0z" fill="currentColor"/><path d="M2 1h4v4H4v1H2zm1 1v2h2V2z" fill="var(--pixel-green-soft)"/></svg><strong>PIXEL</strong></div>
+      <div className="project-name" tabIndex={0} role="group" aria-label="作品详情" onDoubleClick={()=>open(projectRef)} onKeyDown={event=>objectKeys(event,projectRef)}><PixelIcon name="folder"/>{document?.title ?? '正在打开作品'}</div>
+      <div className="header-status"><span className={`status-dot ${connected?'status-dot--online':''}`}/><span>{connected?'本地已连接':'等待连接'}</span></div>
     </header>
     <main className="workbench-main">
-      <div className="workspace-heading"><div><span className="pixel-description">WORK IN PROGRESS / 创作空间</span><h1>从一个想法，开始下一帧。</h1></div><span className="workspace-heading__note"><PixelIcon name="spark"/>视频 · 图像 · 声音</span></div>
+      
       <div className="upper-workspace">
-        <PixelPanel className="viewer-panel" title="作品预览" eyebrow="VIEWER / 01" right={<PixelBadge tone={selectedAsset?'green':'neutral'}>{selectedAsset?'输出就绪':'等待输出'}</PixelBadge>}>
+        <PixelPanel className="viewer-panel" title="作品预览" right={<PixelBadge tone={selectedAsset?'green':'neutral'}>{selectedAsset?'输出就绪':'等待输出'}</PixelBadge>}>
           <div className="viewer-canvas" data-testid="viewer" tabIndex={0} role="group" aria-label="作品预览" onDoubleClick={()=>{if(selectedAsset)open({kind:'asset',projectId:PROJECT_ID,id:selectedAsset.id});}} onKeyDown={event=>{if(event.key==='Enter'&&selectedAsset)open({kind:'asset',projectId:PROJECT_ID,id:selectedAsset.id});}}
             draggable={Boolean(selectedAsset)} onDragStart={event=>{if(!selectedAsset){event.preventDefault();return;}event.dataTransfer.setData('DownloadURL',`${String(selectedAsset.metadata.mimeType)}:pixel-${selectedAsset.id}.${String(selectedAsset.metadata.extension ?? 'bin')}:${location.origin}${assetUrl(selectedAsset.id)}`);event.dataTransfer.setData('text/uri-list',`${location.origin}${assetUrl(selectedAsset.id)}`);}}>
             {selectedAsset?<MediaPreview asset={selectedAsset} large/>:<div className="viewer-placeholder">
               <svg className="pixel-landscape" viewBox="0 0 320 136" aria-hidden="true" shapeRendering="crispEdges"><path d="M0 0h320v136H0z" fill="#e7e9d9"/><path d="M232 20h28v28h-28z" fill="#dcc390"/><path d="M0 88h16V72h24V56h24V40h24v16h20v16h28v24h24v40H0z" fill="#acba9f"/><path d="M176 88h16V68h20V52h20v20h24v16h24v16h40v32H176z" fill="#c5ceba"/><path d="M0 112h56V96h56v16h40v-8h32v16h64v-16h40v16h32v16H0z" fill="#7a9073"/><path d="M152 120h16v-16h16v32h-32z" fill="#e7e9d9"/></svg>
-              <div className="viewer-placeholder__label"><PixelIcon name="frames"/><span>你的下一帧，还未生成</span></div><p>双击片段写下描述，再从右键菜单开始生成。</p>
+              <div className="viewer-placeholder__label"><PixelIcon name="frames"/></div>
             </div>}
             <span className="canvas-corner canvas-corner--tl"/><span className="canvas-corner canvas-corner--br"/>
           </div>
-          <div className="viewer-meta"><span><span className="status-dot"/> {selectedItem?itemTitle(selectedItem).slice(0,30):selectedAsset?String(selectedAsset.metadata.name ?? '素材预览'):'选择一个片段开始创作'}</span><span>{selectedModel?shortModel(selectedModel):'未选择片段'} <span className="meta-divider">/</span> {selectedItem?time(selectedItem.durationTicks/(document?.timelines[selectedItem.timelineId]?.ticksPerSecond ?? 1000)):'--:--'}</span></div>
+          <div className="viewer-meta"><span><span className="status-dot"/> {selectedItem?itemTitle(selectedItem).slice(0,30):selectedAsset?String(selectedAsset.metadata.name ?? '素材预览'):'未选择'}</span><span>{selectedModel?shortModel(selectedModel):'未选择片段'} <span className="meta-divider">/</span> {selectedItem?time(selectedItem.durationTicks/(document?.timelines[selectedItem.timelineId]?.ticksPerSecond ?? 1000)):'--:--'}</span></div>
           {selectedJob && <div className="viewer-job"><PixelProgress value={selectedJob.progress} label={stateTitles[selectedJob.state] ?? '生成任务'}/>{selectedJob.error&&<p className="job-error">{selectedJob.error.message}</p>}</div>}
         </PixelPanel>
-        <PixelPanel className="library-panel" title="素材库" eyebrow="LIBRARY / 02" data-testid="asset-library" right={<PixelBadge>{String(allAssets.length).padStart(2,'0')}</PixelBadge>}
+        <PixelPanel className="library-panel" title="素材库" data-testid="asset-library" right={<PixelBadge>{String(allAssets.length).padStart(2,'0')}</PixelBadge>}
           onDragOver={event=>{if(event.dataTransfer.types.includes('Files')&&host.navigator.isInteractive(undefined)){event.preventDefault();event.dataTransfer.dropEffect='copy';}else dragOver(event,{role:'asset-library',object:projectRef,data:{}});}}
           onDrop={event=>{if(event.dataTransfer.files.length)void importFiles(event);else drop(event,{role:'asset-library',object:projectRef,data:{}});}}>
           <div className="library-filter"><PixelIcon name="folder"/><PixelSelect aria-label="素材类型" value={filter} onChange={event=>setFilter(event.target.value)}><option value="all">全部素材</option><option value="image">图像</option><option value="video">视频</option><option value="audio">音频</option></PixelSelect></div>
@@ -314,11 +314,11 @@ export function App() {
               onClick={()=>setSelected({kind:'asset',projectId:PROJECT_ID,id:asset.id})} onDoubleClick={()=>open({kind:'asset',projectId:PROJECT_ID,id:asset.id})} onKeyDown={event=>objectKeys(event,{kind:'asset',projectId:PROJECT_ID,id:asset.id})}
               onContextMenu={event=>context(event,{kind:'asset',projectId:PROJECT_ID,id:asset.id})} onDragStart={event=>beginDrag(event,{role:'asset',payload:{object:{kind:'asset',projectId:PROJECT_ID,id:asset.id}}})}>
               <div className="asset-card__preview"><MediaPreview asset={asset}/><span><PixelIcon name={iconFor(asset.kind)}/></span></div><p>{String(asset.metadata.name ?? '生成素材')}</p>
-            </div>)}</div>:<div className="library-empty"><div className="library-drop-icon"><PixelIcon name="folder"/><span>+</span></div><p className="pixel-title">给灵感一个落脚点</p><p>将图片、视频或音频<br/>拖入这里，保存为素材。</p><span className="pixel-description">图片参考 · 可复用输出</span></div>}
-          </div><div className="library-footnote"><PixelIcon name="reference"/>拖到时间线插入 · 拖到引用区参考</div>
+            </div>)}</div>:<div className="library-empty"><div className="library-drop-icon"><PixelIcon name="folder"/><span>+</span></div></div>}
+          </div>
         </PixelPanel>
       </div>
-      <PixelPanel className="timeline-panel" title="时间线" eyebrow="TIMELINE / 03" right={<span className="pixel-description">{String(timelines.length).padStart(2,'0')} 条轨道 <span className="meta-divider">/</span> 右键空白处新建</span>}>
+      <PixelPanel className="timeline-panel" title="时间线" right={<span className="pixel-description">{String(timelines.length).padStart(2,'0')} 条轨道</span>}>
         <div className="timeline-scroll" data-testid="timeline-workspace" onContextMenu={event=>context(event,projectRef,undefined,true)} tabIndex={0} role="group" aria-label="时间线工作区" onKeyDown={event=>{if(event.target===event.currentTarget&&(event.key==='ContextMenu'||(event.key==='F10'&&event.shiftKey))){event.preventDefault();const box=event.currentTarget.getBoundingClientRect();contextAt(box.left+220,box.top+40,projectRef,undefined,true);}}}>
           <div className="timeline-content" style={{minWidth:trackWidth+196}}>
             <div className="timeline-ruler"><div className="timeline-label timeline-label--ruler"><PixelIcon name="timeline"/>模型 / 片段</div><div className="ruler-track" style={{width:trackWidth}}>{Array.from({length:Math.ceil(seconds/2)+1},(_,i)=><span key={i} style={{left:i*2*PX_PER_SECOND}}>{time(i*2)}</span>)}</div></div>
@@ -344,14 +344,14 @@ export function App() {
                 </div>
               </div>;
             })}
-            <div className="timeline-blank"><div className="timeline-label"><span className="pixel-description">下一条时间线</span></div><div style={{width:trackWidth}}><PixelIcon name="dots"/>右键选择模型，开始新的创作</div></div>
+            
           </div>
         </div>
-        <div className="timeline-footer"><span><span className="square-mark"/>作品时间以秒显示 · 拖拽以 0.5 秒对齐</span><span>拖动片段移动 · 拖动边缘调整区间</span></div>
+        
       </PixelPanel>
     </main>
     <footer className="app-footer"><span className={feedback.error?'feedback--error':''} role="status" aria-live="polite"><PixelIcon name={feedback.error?'warning':'check'}/>{pending?'正在保存…':feedback.text}</span><span>{activeJobs.length?`${activeJobs.length} 个生成任务进行中`:'没有正在运行的生成任务'}<span className="meta-divider">/</span>{providers.openrouter&&providers.elevenlabs?'模型已配置':'检查模型配置'}<span className="meta-divider">/</span>rev {snapshot?.revision ?? '--'}</span></footer>
-    <PixelModalHost open={Boolean(current)} title={modalTitle} description={path.length>1?`详情路径 / ${path.map((frame,index)=>index===path.length-1?modalTitle:frame.object.kind==='item'?'片段':frame.object.kind==='timeline'?'时间线':frame.object.kind==='asset'?'素材':'作品').join(' / ')}`:'编辑完成自动保存 · Esc 返回'} depth={path.length} onBack={()=>{setMenu(undefined);host.navigator.pop();}}><div data-testid="modal-host">{details()}</div></PixelModalHost>
+    <PixelModalHost open={Boolean(current)} title={modalTitle} description={path.length>1?`详情路径 / ${path.map((frame,index)=>index===path.length-1?modalTitle:frame.object.kind==='item'?'片段':frame.object.kind==='timeline'?'时间线':frame.object.kind==='asset'?'素材':'作品').join(' / ')}`:undefined} depth={path.length} onBack={()=>{setMenu(undefined);host.navigator.pop();}}><div data-testid="modal-host">{details()}</div></PixelModalHost>
     {menu&&<PixelContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(undefined)}/>}
   </div>;
 }

@@ -198,14 +198,14 @@ export function PixelContextMenu({ x, y, items, onClose }: PixelContextMenuProps
       options[next]?.focus();
     }
   }}>
-    <div className="pixel-context-menu__caption">上下文命令</div>
+    
     {items.map(item => <button key={item.id} type="button" role="menuitem" className="pixel-context-menu__item" disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>
       <span className="pixel-context-menu__label">{item.label}</span>
       {item.description && <span className="pixel-description">{item.description}</span>}
       <PixelIcon name="chevron" />
     </button>)}
     {items.length === 0 && <p className="pixel-context-menu__empty pixel-description">当前对象没有可用命令</p>}
-    <div className="pixel-context-menu__hint">↑ ↓ 选择 · Enter 执行 · Esc 返回</div>
+    
   </div>, document.body);
 }
 
@@ -270,11 +270,11 @@ export function PixelModalHost({ open, title, description, children, onBack, dep
   return createPortal(<div data-pixel-modal="" className="pixel-modal-backdrop" onDragOver={event => event.preventDefault()} onDrop={event => event.preventDefault()}>
     <div ref={ref} className="pixel-modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} tabIndex={-1}>
       <div className="pixel-modal__header">
-        <div><p className="pixel-description">对象详情 / 第 {depth} 层</p><h2 id={titleId} className="pixel-title">{title}</h2>{description && <p id={descriptionId} className="pixel-description">{description}</p>}</div>
+        <div><h2 id={titleId} className="pixel-title">{title}</h2>{description && <p id={descriptionId} className="pixel-description">{description}</p>}</div>
         <span className="pixel-keycap" aria-label="按 Escape 返回上一层">Esc ↩</span>
       </div>
       <div className="pixel-modal__content">{children}</div>
-      <div className="pixel-modal__footer"><span>字段完成编辑后提交</span><span>Esc 返回上一层</span></div>
+      
     </div>
   </div>, document.body);
 }
