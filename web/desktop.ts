@@ -3,7 +3,7 @@ import type { ObjectRef, Unsubscribe } from '../src/contracts.js';
 /** Preload exposes window operations only; edits still use the shared Action bridge. */
 export interface PixelDesktop {
   readonly isDetailWindow: boolean;
-  openDetails(request: { object: ObjectRef }): Promise<void>;
+  openDetails(request: { object: ObjectRef; view?: 'library' }): Promise<void>;
   onDetailsClosed(listener: () => void): Unsubscribe;
   minimize(): void;
   toggleMaximize(): void;
@@ -28,4 +28,9 @@ export function initialDetailObject(): ObjectRef | undefined {
       return { kind: object.kind, projectId: object.projectId, id: object.id };
   } catch { /* Invalid local navigation never opens an arbitrary object. */ }
   return undefined;
+}
+
+/** Only the project's library is a supported alternative root detail view. */
+export function initialDetailView(): 'library' | undefined {
+  return initialDetailObject()?.kind === 'project' && new URLSearchParams(location.search).get('view') === 'library' ? 'library' : undefined;
 }

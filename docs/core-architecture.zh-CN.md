@@ -17,13 +17,13 @@
 | Timeline item | 进入参数及输出详情 | 生成、重新生成、复制、删除等 | 拖边缘修改时间范围；Asset 拖入引用区域建立 Reference；item 拖入资产库保存为资产 |
 | 资产库 | 双击资产进入详情 | 资产及资源库命令 | 外部媒体拖入导入资产 |
 | Asset | 进入媒体详情 | 素材命令 | 建立 item 的参考素材关系 |
-| Viewer | 进入输出详情 | 输出相关命令 | 拖出已经准备好的真实文件 |
+| Viewer | 进入输出详情 | 素材库：打开当前项目素材上下文，空预览及已有输出均可 | 拖出已经准备好的真实文件 |
 
 模型不是可拖到时间线上的媒体对象。新建操作从 Timeline 工作区空白处的右键菜单进入“新建时间线”，选择模型后执行 `timeline.create`，只创建该模型对应的空 Timeline，不隐式附送 Item 或提示词。生成新内容的标准路径是已有 Timeline 时间位置右键 → 新建生成草稿，提交 `item.createDraft`，只接受 `timelineId` 与 `startTick`，不接受 `assetId`，结果是不带输出的 Item。放置已有素材的标准路径是 Asset → Timeline 时间位置，提交带 `assetId` 的 `item.create`，结果是已关联该素材的 Item。插件为两者提供默认数据及约束；参数编辑随后发生在 Item 详情中。
 
 两条 GUI 路径具有不同前置对象和业务结果：从模型与时间位置发起生成草稿，从既有素材发起放置。`item.createDraft` 严格拒绝资产参数，`item.create` 要求资产；两者共享创建内核、插件校验、位置不变量和事务规则。已有项目数据及已保存的幂等记录不受影响。正式项目 CLI / Agent 接线时必须复用这些 Action 与校验；这些适配器尚未实现。
 
-资产库的唯一 GUI 进入路径为双击项目标题 → 作品详情 → 双击素材库。库内关系拖拽时，宿主在当前顶部详情作用域临时呈现已存在的 Timeline / Item 目标，复用 Asset → Timeline、Asset → Item 引用和 Item → Library 的既有角色路由；背景及旧详情层仍被隔离。上表也包含产品目标路径，例如项目文件拖入打开；当前完成状态以第 10 节为准。
+资产库的唯一 GUI 进入路径为主 Viewer 右键 → 素材库，空预览及已有输出均可进入。按用户明确要求，该项登记为 P03 的局部导航例外：直接打开当前独立详情窗口或浏览器唯一 Modal 的根层，不创建业务 Action、不修改项目快照。项目标题双击仍进入项目对象详情，其中移除素材库旧入口。库内关系拖拽时，宿主在当前顶部详情作用域临时呈现已存在的 Timeline / Item 目标，复用 Asset → Timeline、Asset → Item 引用和 Item → Library 的既有角色路由；背景及旧详情层仍被隔离。上表也包含产品目标路径，例如项目文件拖入打开；当前完成状态以第 10 节为准。
 
 对象关系保持浅层：
 
@@ -263,7 +263,7 @@ Zod schema、方法和 provider 实例属于进程内的 registry，不能直接
 
 Modal 的 path、局部选中和表单状态只属于当前窗口。每个 `ModalFrame` 有独立 `scopeId`，当前 `isInteractive()` 只允许顶部 frame；无 Modal 时只允许工作区 scope。宿主将该检查用于背景右键、拖拽和编辑快捷键，防止同一次 drop 误改背景时间线。`reconcile()` 在对象删除后退回仍存在的祖先。Radix 可以用于焦点约束与弹层，但业务导航仍由 path 管理。
 
-当前资产库是项目详情 path 的子视图。拖入素材、展示已有对象的关系目标、hover 及 drop 都带当前顶部 `scopeId`；新引用或放置仍通过同一个 `DragRegistry` 转成 Action。支持引用且存在关系或合法拖拽时才显示引用区，不支持引用的模型不显示该能力。库内的来源与目标位于同一个活动窗口，不依赖解除背景隔离，也不等于已实现 `NativeDragBroker`。
+资产库从 Viewer 菜单直接作为详情 path 的根层打开，无菜单或子层时 Esc 关闭；双击库内对象推进子层，Esc 返回库。打开和关闭是宿主局部导航，不进入项目 Action 或 revision。拖入素材、展示已有对象的关系目标、hover 及 drop 都带当前顶部 `scopeId`；新引用或放置仍通过同一个 `DragRegistry` 转成 Action。支持引用且存在关系或合法拖拽时才显示引用区，不支持引用的模型不显示该能力。库内的来源与目标位于同一个活动窗口，不依赖解除背景隔离，也不等于已实现 `NativeDragBroker`。本次入口调整不迁移既有项目，已通过类型检查、12 项浏览器交互测试及原生桌面验证；具体验证范围见[哲学对齐记录](philosophy-alignment.zh-CN.md)。
 
 单窗口中的 dnd-kit 可管理手势；跨窗口拖拽不能共享一份 React 拖拽内存。当前 `NativeDragBroker` 仅是待实现契约：`begin()` 创建带过期时间的会话，DataTransfer 携带 session token，接收窗口 `resolve()` 用于 hover 预览；drop 必须调用 `consume()` 原子解析并消费 token，`end()` 负责结束及取消清理。来源和接收窗口身份由可信 IPC sender 绑定，后端在 drop 时重新校验对象存在、权限、来源与目标兼容性，再生成同一种动作。payload 不携带 provider 凭证、任意文件路径或可执行闭包。跨项目引用需要定义为复制/导入动作，不能直接保存指向另一项目的悬空 ID。
 

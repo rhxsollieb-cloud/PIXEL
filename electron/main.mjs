@@ -80,6 +80,7 @@ async function openDetails(launch) {
       || value.projectId !== 'pixel-project' || (value.kind !== 'project' && (typeof value.id !== 'string' || !value.id || value.id.length > 200))) {
     throw new Error('Invalid detail object');
   }
+  if (launch.view !== undefined && (launch.view !== 'library' || value.kind !== 'project')) throw new Error('Invalid detail view');
   const snapshot = await runtime.workbench.snapshot();
   const record = value.kind === 'timeline' ? snapshot.document.timelines : value.kind === 'item' ? snapshot.document.items : snapshot.document.assets;
   if (value.kind !== 'project' && !Object.hasOwn(record, value.id)) throw new Error('Detail object no longer exists');
@@ -93,7 +94,7 @@ async function openDetails(launch) {
     if (!closing && workspace && !workspace.isDestroyed() && !workspace.webContents.isDestroyed()) workspace.webContents.send('pixel:details-closed');
   });
   try {
-    await child.loadURL(`${baseUrl}?detail=${encodeURIComponent(JSON.stringify(object))}`);
+    await child.loadURL(`${baseUrl}?detail=${encodeURIComponent(JSON.stringify(object))}${launch.view === 'library' ? '&view=library' : ''}`);
     if (!hideWindows && !child.isDestroyed()) child.show();
   }
   catch (error) { child.destroy(); throw error; }

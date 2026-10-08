@@ -66,6 +66,33 @@ test('默认工作区只呈现 Viewer 与 Timeline，不提前披露素材库或
   await page.screenshot({ path: resolve('.pixel/screenshots/frontend.png'), fullPage: true });
 });
 
+test('空预览的右键和键盘上下文菜单进入素材库，作品详情不保留第二入口', async ({ page }) => {
+  await openWorkbench(page);
+  const before = await snapshot(page);
+  const viewer = page.getByTestId('viewer');
+  await expect(viewer).toHaveText('暂无输出');
+  await openLibrary(page);
+  await viewer.dispatchEvent('contextmenu', { clientX: 400, clientY: 160 });
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('#root')).not.toHaveAttribute('inert', '');
+  await viewer.focus();
+  await viewer.press('Shift+F10');
+  await expect(page.getByRole('menuitem')).toHaveCount(1);
+  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('group', { name: '作品详情', exact: true }).dblclick();
+  await expect(page.getByRole('dialog', { name: '作品详情', exact: true })).toBeVisible();
+  await expect(page.getByRole('group', { name: '进入素材库', exact: true })).toHaveCount(0);
+  await expect(page.getByTestId('asset-library')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(await snapshot(page)).toEqual(before);
+});
+
 async function createTimeline(page: Page, title: string): Promise<void> {
   await page.getByTestId('timeline-workspace').click({ button: 'right', position: { x: 260, y: 16 } });
   await expect(page.getByRole('menuitem')).toHaveCount(1);
@@ -205,9 +232,9 @@ test('片段本体拖动位置，边缘独立调整区间，模型参数保持�
 });
 
 async function openLibrary(page: Page): Promise<void> {
-  await page.getByRole('group', { name: '作品详情', exact: true }).dblclick();
-  await expect(page.getByRole('dialog', { name: '作品详情', exact: true })).toBeVisible();
-  await page.getByRole('group', { name: '进入素材库', exact: true }).dblclick();
+  await page.getByTestId('viewer').click({ button: 'right' });
+  await expect(page.getByRole('menuitem')).toHaveCount(1);
+  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(1);
 }
@@ -226,11 +253,12 @@ async function scopedAssetDrop(page: Page, sourceName: string, target: ReturnTyp
   await transfer.dispose();
 }
 
-test('库由对象详情进入，导入和关系拖拽在当前 Modal 内完成，背景保持隔离', async ({ page }) => {
+test('预览右键进入库，导入和关系拖拽在当前 Modal 内完成，有输出时仍可进入', async ({ page }) => {
   await openWorkbench(page);
   await openLibrary(page);
   await expect(page.locator('#root')).toHaveAttribute('inert', '');
   await page.getByTestId('timeline-workspace').dispatchEvent('contextmenu', { clientX: 300, clientY: 650 });
+  await page.getByTestId('viewer').dispatchEvent('contextmenu', { clientX: 400, clientY: 160 });
   await expect(page.getByRole('menu')).toHaveCount(0);
   const transfer = await page.evaluateHandle(() => {
     const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), character => character.charCodeAt(0));
@@ -239,7 +267,15 @@ test('库由对象详情进入，导入和关系拖拽在当前 Modal 内完成�
     return data;
   });
   await page.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: transfer });
+  await transfer.dispose();
   await expect(page.getByTestId('asset-card').filter({ hasText: 'reference.png' })).toBeVisible();
+  const afterImport = await snapshot(page);
+  await page.getByTestId('asset-card').filter({ hasText: 'reference.png' }).dblclick();
+  await expect(page.getByRole('dialog', { name: '素材详情', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
+  expect(await snapshot(page)).toEqual(afterImport);
   const asset = Object.values((await snapshot(page)).document.assets).find(candidate => candidate.metadata.name === 'reference.png')!;
   const wanId = await itemForModel(page, 'alibaba/wan-3.0');
   await scopedAssetDrop(page, 'reference.png', page.locator(`[data-testid="relation-reference"][data-item-id="${wanId}"]`));
@@ -268,10 +304,17 @@ test('库由对象详情进入，导入和关系拖拽在当前 Modal 内完成�
   expect(Object.keys((await snapshot(page)).document.assets)).toHaveLength(1);
   await saveTransfer.dispose();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog', { name: '作品详情', exact: true })).toBeVisible();
-  await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByTestId('asset-library')).toHaveCount(0);
+  await page.locator(`[data-testid="timeline-item"][data-item-id="${created!.id}"]`).click();
+  await expect(page.getByTestId('viewer').locator('img')).toHaveAttribute('src', `/api/media/${asset.id}`);
+  const beforeReopen = await snapshot(page);
+  await openLibrary(page);
+  await page.getByTestId('viewer').dispatchEvent('contextmenu', { clientX: 400, clientY: 160 });
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(await snapshot(page)).toEqual(beforeReopen);
 });
 
 test('播放指针点击、拖动和键盘定位联动预览，不改写项目，Modal 背景不能定位', async ({ page }) => {
@@ -340,7 +383,8 @@ test('实际音频随播放指针定位素材时间，定位不会提交生成�
   await expect.poll(async () => (await snapshot(page)).document.timelines[voice.id]?.itemIds.length).toBe(voice.itemIds.length + 1);
   const after = await snapshot(page);
   const placed = Object.values(after.document.items).find(item => !before.document.items[item.id])!;
-  await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.locator(`[data-testid="timeline-item"][data-item-id="${placed.id}"]`).click();
   const audio = page.getByTestId('viewer').locator('audio');
   await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.readyState)).toBeGreaterThan(0);

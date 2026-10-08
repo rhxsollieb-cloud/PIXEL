@@ -4,7 +4,7 @@ import { ActionClient, ProjectProjectionStore, type DragSource, type DragTarget 
 import type { ModelDeclaration } from '../src/models.js';
 import type { PluginFieldDeclaration } from '../src/plugins.js';
 import { HttpDesktopBridge, assetUrl } from './bridge.js';
-import { initialDetailObject } from './desktop.js';
+import { initialDetailObject, initialDetailView } from './desktop.js';
 import { createInteractionHost } from './interaction.js';
 import { clampPlaybackMs, itemAtPlaybackTime, playbackTimeLabel, sourcePlaybackSeconds } from './playback.js';
 import { atPath, defaultFromSchema, FieldEditor, fieldLabel, schemaAtPath, withPath, type FieldPath } from './fields.js';
@@ -81,7 +81,12 @@ export function App() {
   const [resize,setResize]=useState<{id:string;startTick:number;durationTicks:number} | undefined>();
   const [exportTicket,setExportTicket]=useState<{assetId:string;ticket:string} | undefined>();
   const [exportRefresh,setExportRefresh]=useState(0);
-  const [fieldPaths]=useState(()=>new Map<string,FieldPath>());
+  const [fieldPaths]=useState(()=>{
+    const paths=new Map<string,FieldPath>();
+    const frame=host.navigator.current();
+    if(frame && initialDetailView()==='library')paths.set(frame.scopeId,['$library']);
+    return paths;
+  });
   const current=path.at(-1);
   const document=snapshot?.document;
   const timelines=Object.values(document?.timelines ?? {});
@@ -209,7 +214,7 @@ export function App() {
     setMenu(undefined);
     const frame=scopeId?host.navigator.push(object):host.navigator.open(object);
     if(fieldPath)fieldPaths.set(frame.scopeId,fieldPath);
-    if (desktop && !detailMode && !scopeId) void desktop.openDetails({object}).catch(()=>{
+    if (desktop && !detailMode && !scopeId) void desktop.openDetails({object,...(fieldPath?.[0]==='$library'?{view:'library' as const}:{})}).catch(()=>{
       host.navigator.reset(); setFeedback({text:'详情窗口未能打开',error:true});
     });
   }
@@ -242,6 +247,10 @@ export function App() {
   function context(event:React.MouseEvent,target:ObjectRef,scopeId?:string,createOnly=false,data?:JsonObject) {
     if((event.target as HTMLElement).closest('input,textarea,select'))return;
     event.preventDefault();event.stopPropagation();contextAt(event.clientX,event.clientY,target,scopeId,createOnly,data);
+  }
+  function viewerMenuAt(x:number,y:number) {
+    if(!store.getSnapshot() || !host.navigator.isInteractive(undefined))return;
+    setMenu({x,y,items:[{id:'navigate.library',label:'素材库',onSelect:()=>open(projectRef,undefined,['$library'])}]});
   }
   function beginDrag(event:DragEvent,source:DragSource,ticksPerSecond=1000,scopeId?:string) {
     if(!host.navigator.isInteractive(scopeId)){event.preventDefault();return;}
@@ -384,7 +393,6 @@ export function App() {
     if(object.kind==='project'&&nestedPath[0]==='$library')return library(scope);
     if(object.kind==='project')return <div className="details-stack">
       <PixelField label="作品名称"><TitleField title={document.title} onCommit={title=>execute('project.title',{title},scope)}/></PixelField>
-      <div className="detail-link" data-testid="library-link" tabIndex={0} role="group" aria-label="进入素材库" onDoubleClick={()=>open(projectRef,scope,['$library'])} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();open(projectRef,scope,['$library']);}}}><PixelIcon name="folder"/>素材库<span><PixelIcon name="chevron"/></span></div>
     </div>;
     if(object.kind==='asset'){
       const asset=document.assets[object.id];if(!asset)return null;
@@ -466,7 +474,12 @@ export function App() {
       
       <div className="upper-workspace">
         <PixelPanel className="viewer-panel">
-          <div className="viewer-canvas" data-testid="viewer" tabIndex={0} role="group" aria-label="作品预览" onDoubleClick={()=>{if(selectedAsset)open({kind:'asset',projectId:PROJECT_ID,id:selectedAsset.id});}} onKeyDown={event=>{if(event.key==='Enter'&&selectedAsset)open({kind:'asset',projectId:PROJECT_ID,id:selectedAsset.id});}}
+          <div className="viewer-canvas" data-testid="viewer" tabIndex={0} role="group" aria-label="作品预览" onDoubleClick={()=>{if(selectedAsset)open({kind:'asset',projectId:PROJECT_ID,id:selectedAsset.id});}}
+            onContextMenu={event=>{event.preventDefault();event.stopPropagation();viewerMenuAt(event.clientX,event.clientY);}}
+            onKeyDown={event=>{
+              if(event.key==='Enter'&&selectedAsset){event.preventDefault();open({kind:'asset',projectId:PROJECT_ID,id:selectedAsset.id});}
+              else if(event.key==='ContextMenu'||(event.key==='F10'&&event.shiftKey)){event.preventDefault();event.stopPropagation();const box=event.currentTarget.getBoundingClientRect();viewerMenuAt(box.left+24,box.top+24);}
+            }}
             draggable={Boolean(selectedAsset&&(!desktop||exportTicket?.assetId===selectedAsset.id))} onDragStart={event=>{
               if(!selectedAsset){event.preventDefault();return;}
               if(desktop){event.preventDefault();if(exportTicket?.assetId===selectedAsset.id){desktop.startExport(exportTicket.ticket);setExportTicket(undefined);setExportRefresh(value=>value+1);}return;}

@@ -50,6 +50,33 @@ try {
   await writeFile(join(screenshots, 'desktop-empty.png'), Buffer.from(emptyCapture, 'base64'));
   console.log('PIXEL_NATIVE_EMPTY_OK');
 
+  const emptyLibraryWindow = desktop.waitForEvent('window');
+  await emptyWorkspace.getByTestId('viewer').click({ button: 'right', position: { x: 120, y: 120 } });
+  await expect(emptyWorkspace.getByRole('menuitem')).toHaveCount(1);
+  await emptyWorkspace.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  const emptyLibrary = await emptyLibraryWindow;
+  await expect(emptyLibrary.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
+  await expect(emptyLibrary.getByTestId('asset-library')).toContainText('拖入素材');
+  assert.equal(new URL(emptyLibrary.url()).searchParams.get('view'), 'library');
+  assert.deepEqual(await snapshot(emptyLibrary), emptyProject);
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => {
+    const windows = BrowserWindow.getAllWindows();
+    return windows.length === 2 && windows.some(window => window.isModal() && window.getParentWindow())
+      && !windows.find(window => !window.getParentWindow()).isEnabled();
+  }), true);
+  await emptyWorkspace.getByTestId('viewer').dispatchEvent('contextmenu', { clientX: 200, clientY: 200 });
+  await expect(emptyWorkspace.getByRole('menu')).toHaveCount(0);
+  const emptyLibraryClosed = emptyLibrary.waitForEvent('close');
+  await emptyLibrary.keyboard.press('Escape').catch(error => { if (!emptyLibrary.isClosed()) throw error; });
+  await emptyLibraryClosed;
+  assert.deepEqual(await snapshot(emptyWorkspace), emptyProject);
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => !window.getParentWindow()).isEnabled()), true);
+  assert.equal(await emptyWorkspace.evaluate(async () => {
+    try { await window.pixelDesktop.openDetails({ object: { kind: 'project', projectId: 'pixel-project' }, view: 'unsupported' }); return false; }
+    catch { return true; }
+  }), true);
+  console.log('PIXEL_NATIVE_VIEWER_LIBRARY_OK');
+
   await emptyWorkspace.getByTestId('timeline-workspace').click({ button: 'right', position: { x: 260, y: 16 } });
   await emptyWorkspace.getByRole('menuitem', { name: '新建时间线', exact: true }).click();
   await emptyWorkspace.getByRole('menuitem', { name: 'Alibaba: Wan 3.0', exact: true }).click();
@@ -183,10 +210,9 @@ try {
   assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => !window.getParentWindow()).isEnabled()), true);
   await workspace.getByRole('button', { name: '还原窗口', exact: true }).click();
   const libraryWindow = desktop.waitForEvent('window');
-  await workspace.getByRole('group', { name: '作品详情', exact: true }).dblclick();
+  await workspace.getByTestId('viewer').click({ button: 'right', position: { x: 120, y: 120 } });
+  await workspace.getByRole('menuitem', { name: '素材库', exact: true }).click();
   const libraryPage = await libraryWindow;
-  await expect(libraryPage.getByRole('dialog', { name: '作品详情', exact: true })).toBeVisible();
-  await libraryPage.getByRole('group', { name: '进入素材库', exact: true }).dblclick();
   await expect(libraryPage.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
   await expect(libraryPage.getByRole('dialog')).toHaveCount(1);
   assert.equal(desktop.windows().length, 2);
@@ -247,8 +273,6 @@ try {
   assert.equal(desktop.windows().length, 2);
   await workspace.getByTestId('timeline-workspace').dispatchEvent('contextmenu', { clientX: 400, clientY: 800 });
   await expect(workspace.getByRole('menu')).toHaveCount(0);
-  await libraryPage.keyboard.press('Escape').catch(error => { if (!libraryPage.isClosed()) throw error; });
-  await expect(libraryPage.getByRole('dialog', { name: '作品详情', exact: true })).toBeVisible();
   const libraryClosed = libraryPage.waitForEvent('close');
   await libraryPage.keyboard.press('Escape').catch(error => { if (!libraryPage.isClosed()) throw error; });
   await libraryClosed;
