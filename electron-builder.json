@@ -2,7 +2,7 @@
   "appId": "cloud.rhxsollieb.pixel",
   "productName": "Pixel",
   "directories": { "output": "release" },
-  "files": ["dist/**/*", "electron/main.mjs", "electron/preload.cjs", "electron/backend.mjs", "electron/export-tickets.mjs", "electron/icon.png", "package.json"],
+  "files": ["dist/**/*", "electron/*.mjs", "electron/preload.cjs", "electron/icon.png", "package.json"],
   "asar": true,
   "npmRebuild": false,
   "win": {

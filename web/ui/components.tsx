@@ -20,6 +20,20 @@ function classes(...values: (string | undefined | false)[]): string {
   return values.filter(Boolean).join(' ');
 }
 
+export interface PixelWindowHostProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> {
+  title: ReactNode;
+  controls?: ReactNode;
+  kind?: 'workspace' | 'library';
+}
+
+/** Working windows share chrome and content; modal isolation belongs to object details. */
+export function PixelWindowHost({ title, controls, children, className, kind = 'workspace', ...props }: PixelWindowHostProps) {
+  return <div {...props} className={classes('pixel-window', 'workbench', `pixel-window--${kind}`, className)}>
+    <header className="app-header"><div className="pixel-window__title">{title}</div>{controls}</header>
+    {children}
+  </div>;
+}
+
 export interface PixelPanelProps extends HTMLAttributes<HTMLDivElement> {
   title?: string;
   eyebrow?: string;
@@ -264,7 +278,7 @@ export function PixelModalHost({ open, title, description, children, onBack, dep
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     ref.current?.focus();
-    const containsFocus = (element: Element | null) => Boolean(element && (ref.current?.contains(element) || (standalone && element.closest('[data-pixel-window-controls]'))));
+    const containsFocus = (element: Element | null) => Boolean(element && !element.closest('[inert], [aria-hidden="true"]') && (ref.current?.contains(element) || (standalone && element.closest('[data-pixel-window-controls]'))));
     const focusInside = (event: FocusEvent) => {
       if (!(event.target instanceof HTMLElement) || event.target.closest('[data-pixel-context-menu]')) return;
       if (!containsFocus(event.target)) ref.current?.focus();
@@ -274,7 +288,7 @@ export function PixelModalHost({ open, title, description, children, onBack, dep
       if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); backRef.current(); return; }
       if (event.key !== 'Tab') return;
       const controls = standalone ? Array.from(document.querySelectorAll<HTMLElement>('[data-pixel-window-controls]')).flatMap(element => Array.from(element.querySelectorAll<HTMLElement>(focusableSelector))) : [];
-      const targets = [...new Set([...Array.from(ref.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? []), ...controls])].filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true' && element.getClientRects().length > 0);
+      const targets = [...new Set([...Array.from(ref.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? []), ...controls])].filter(element => !element.closest('[inert], [hidden], [aria-hidden="true"], :disabled') && element.getClientRects().length > 0);
       const first = targets[0];
       const last = targets[targets.length - 1];
       if (!first || !last) { event.preventDefault(); ref.current?.focus(); return; }

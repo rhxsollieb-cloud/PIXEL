@@ -66,30 +66,30 @@ test('默认工作区只呈现 Viewer 与 Timeline，不提前披露素材库或
   await page.screenshot({ path: resolve('.pixel/screenshots/frontend.png'), fullPage: true });
 });
 
-test('空预览的右键和键盘上下文菜单进入素材库，作品详情不保留第二入口', async ({ page }) => {
+test('素材库是独立非模态工作窗口，空预览与键盘入口不锁主窗口', async ({ page }) => {
   await openWorkbench(page);
   const before = await snapshot(page);
-  const viewer = page.getByTestId('viewer');
-  await expect(viewer).toHaveText('暂无输出');
-  await openLibrary(page);
-  await viewer.dispatchEvent('contextmenu', { clientX: 400, clientY: 160 });
-  await expect(page.getByRole('menu')).toHaveCount(0);
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const library = await openLibrary(page);
   await expect(page.locator('#root')).not.toHaveAttribute('inert', '');
-  await viewer.focus();
-  await viewer.press('Shift+F10');
-  await expect(page.getByRole('menuitem')).toHaveCount(1);
-  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
-  await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(library.getByRole('dialog')).toHaveCount(0);
+  await page.getByTestId('timeline-ruler').click({ position: { x: 64, y: 8 } });
+  await expect(page.getByTestId('timeline-ruler')).toHaveAttribute('aria-valuenow', '2000');
+  const closed = library.waitForEvent('close');
+  await library.getByTestId('library-window').focus();
+  await library.keyboard.press('Escape').catch(error => { if (!library.isClosed()) throw error; });
+  await closed;
+  await page.getByTestId('viewer').focus();
+  const next = page.waitForEvent('popup');
+  await page.getByTestId('viewer').press('Shift+F10');
+  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  const reopened = await next;
+  await expect(reopened.getByTestId('library-window')).toBeVisible();
+  await reopened.close();
   await page.getByRole('group', { name: '作品详情', exact: true }).dblclick();
   await expect(page.getByRole('dialog', { name: '作品详情', exact: true })).toBeVisible();
   await expect(page.getByRole('group', { name: '进入素材库', exact: true })).toHaveCount(0);
-  await expect(page.getByTestId('asset-library')).toHaveCount(0);
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(await snapshot(page)).toEqual(before);
 });
 
@@ -231,90 +231,116 @@ test('片段本体拖动位置，边缘独立调整区间，模型参数保持�
   expect((await snapshot(page)).document.items[id]?.params.durationSeconds).toBe(initial.params.durationSeconds);
 });
 
-async function openLibrary(page: Page): Promise<void> {
+async function openLibrary(page: Page): Promise<Page> {
   await page.getByTestId('viewer').click({ button: 'right' });
   await expect(page.getByRole('menuitem')).toHaveCount(1);
+  const popup = page.waitForEvent('popup');
   await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
-  await expect(page.getByRole('dialog')).toHaveCount(1);
+  const library = await popup;
+  await expect(library.getByTestId('library-window')).toBeVisible();
+  await expect(library.getByTestId('asset-library')).toBeVisible();
+  return library;
 }
 
-async function scopedAssetDrop(page: Page, sourceName: string, target: ReturnType<Page['locator']>, x = 12): Promise<void> {
-  const source = page.getByTestId('asset-card').filter({ hasText: sourceName });
-  const transfer = await page.evaluateHandle(() => new DataTransfer());
-  const sourceBox = await source.boundingBox();
-  await source.dispatchEvent('dragstart', { dataTransfer: transfer, clientX: sourceBox!.x + 12, clientY: sourceBox!.y + 12 });
+async function windowDrop(sourcePage: Page, source: ReturnType<Page['locator']>, targetPage: Page, target: ReturnType<Page['locator']>, x = 12): Promise<string> {
+  const transfer = await sourcePage.evaluateHandle(() => new DataTransfer());
+  const box = await source.boundingBox();
+  expect(box).not.toBeNull();
+  await source.dispatchEvent('dragstart', { dataTransfer: transfer, clientX: box!.x + 12, clientY: box!.y + 12 });
+  const token = await sourcePage.evaluate(data => data.getData('application/x-pixel-object'), transfer);
+  expect(token).toBeTruthy();
   await expect(target).toBeVisible();
-  const box = await target.boundingBox();
-  const event = { dataTransfer: transfer, clientX: box!.x + x, clientY: box!.y + 12 };
+  const targetData = await targetPage.evaluateHandle(value => {
+    const data = new DataTransfer(); data.setData('application/x-pixel-object', value); return data;
+  }, token);
+  const targetBox = await target.boundingBox();
+  expect(targetBox).not.toBeNull();
+  const event = { dataTransfer: targetData, clientX: targetBox!.x + x, clientY: targetBox!.y + 12 };
+  const before = await snapshot(targetPage);
+  const unrelated = await targetPage.evaluateHandle(() => new DataTransfer());
+  await target.dispatchEvent('drop', {...event,dataTransfer:unrelated});
+  await unrelated.dispose();
+  expect(await snapshot(targetPage)).toEqual(before);
   await target.dispatchEvent('dragover', event);
   await target.dispatchEvent('drop', event);
   await source.dispatchEvent('dragend', { dataTransfer: transfer });
-  await transfer.dispose();
+  await transfer.dispose(); await targetData.dispose();
+  return token;
 }
 
-test('预览右键进入库，导入和关系拖拽在当前 Modal 内完成，有输出时仍可进入', async ({ page }) => {
+test('真实工作窗口双向拖拽放置、引用和复用，局部详情只隔离所属窗口', async ({ page }) => {
   await openWorkbench(page);
-  await openLibrary(page);
-  await expect(page.locator('#root')).toHaveAttribute('inert', '');
-  await page.getByTestId('timeline-workspace').dispatchEvent('contextmenu', { clientX: 300, clientY: 650 });
-  await page.getByTestId('viewer').dispatchEvent('contextmenu', { clientX: 400, clientY: 160 });
-  await expect(page.getByRole('menu')).toHaveCount(0);
-  const transfer = await page.evaluateHandle(() => {
-    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), character => character.charCodeAt(0));
-    const data = new DataTransfer();
-    data.items.add(new File([png], 'reference.png', { type: 'image/png' }));
-    return data;
+  const library = await openLibrary(page);
+  const transfer = await library.evaluateHandle(() => {
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+    const data = new DataTransfer(); data.items.add(new File([png], 'reference.png', { type: 'image/png' })); return data;
   });
-  await page.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: transfer });
+  await library.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: transfer });
   await transfer.dispose();
-  await expect(page.getByTestId('asset-card').filter({ hasText: 'reference.png' })).toBeVisible();
+  const source = library.getByTestId('asset-card').filter({ hasText: 'reference.png' });
+  await expect(source).toBeVisible();
   const afterImport = await snapshot(page);
-  await page.getByTestId('asset-card').filter({ hasText: 'reference.png' }).dblclick();
-  await expect(page.getByRole('dialog', { name: '素材详情', exact: true })).toBeVisible();
-  await expect(page.getByRole('dialog')).toHaveCount(1);
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
+  const asset = Object.values(afterImport.document.assets).find(candidate => candidate.metadata.name === 'reference.png')!;
+  await source.dblclick();
+  await expect(library.getByRole('dialog', { name: '素材详情', exact: true })).toBeVisible();
+  await expect(library.getByTestId('library-window')).toHaveAttribute('inert', '');
+  await library.getByRole('dialog').focus();
+  await library.keyboard.press('Shift+Tab');
+  await expect(library.getByRole('dialog').getByRole('button', { name: '关闭窗口', exact: true })).toBeFocused();
+  await library.keyboard.press('Tab');
+  await expect(library.getByRole('dialog').getByRole('button', { name: '关闭窗口', exact: true })).toBeFocused();
+  await expect(page.locator('#root')).not.toHaveAttribute('inert', '');
+  await page.getByTestId('timeline-ruler').click({ position: { x: 96, y: 8 } });
+  await expect(page.getByTestId('timeline-ruler')).toHaveAttribute('aria-valuenow', '3000');
+  await library.keyboard.press('Escape');
+  await expect(library.getByRole('dialog')).toHaveCount(0);
   expect(await snapshot(page)).toEqual(afterImport);
-  const asset = Object.values((await snapshot(page)).document.assets).find(candidate => candidate.metadata.name === 'reference.png')!;
   const wanId = await itemForModel(page, 'alibaba/wan-3.0');
-  await scopedAssetDrop(page, 'reference.png', page.locator(`[data-testid="relation-reference"][data-item-id="${wanId}"]`));
+  await windowDrop(library, source, page, page.locator(`[data-testid="timeline-item"][data-item-id="${wanId}"]`).getByTestId('item-reference-drop'));
   await expect.poll(async () => (await snapshot(page)).document.items[wanId]?.referenceAssetIds).toContain(asset.id);
-  const duplicateTransfer = await page.evaluateHandle(() => new DataTransfer());
-  const assetSource = page.getByTestId('asset-card').filter({ hasText: 'reference.png' });
-  await assetSource.dispatchEvent('dragstart', { dataTransfer: duplicateTransfer });
-  await expect(page.locator(`[data-testid="relation-reference"][data-item-id="${wanId}"]`)).toHaveCount(0);
-  await expect(page.locator(`[data-testid="relation-reference"][data-item-id="${(await itemForModel(page, 'eleven_v4'))}"]`)).toHaveCount(0);
-  await assetSource.dispatchEvent('dragend', { dataTransfer: duplicateTransfer });
-  await duplicateTransfer.dispose();
+  const referenced = await snapshot(page);
+  const unreference = await page.request.post('/api/actions', { data: { requestId: crypto.randomUUID(), projectId: referenced.document.id, expectedRevision: referenced.revision,
+    type:'item.reference.remove', payload:{itemId:wanId,assetId:asset.id} } });
+  expect((await unreference.json()).ok).toBe(true);
+  await expect.poll(async () => (await snapshot(page)).document.items[wanId]?.referenceAssetIds).toEqual([]);
+  await page.locator(`[data-testid="timeline-item"][data-item-id="${wanId}"]`).dblclick({position:{x:70,y:24}});
+  await expect(page.getByRole('dialog', {name:'片段详情',exact:true})).toBeVisible();
+  await windowDrop(library, source, page, page.getByRole('dialog').getByTestId('item-reference'));
+  await expect.poll(async () => (await snapshot(page)).document.items[wanId]?.referenceAssetIds).toContain(asset.id);
+  await page.keyboard.press('Escape');
   const before = await snapshot(page);
-  const timeline = Object.values(before.document.timelines).find(candidate => candidate.modelId === 'x-ai/grok-imagine-image-2.0')!;
-  await scopedAssetDrop(page, 'reference.png', page.locator(`[data-testid="relation-track"][data-timeline-id="${timeline.id}"]`), 320);
+  const timeline = Object.values(before.document.timelines).find(t => t.modelId === 'x-ai/grok-imagine-image-2.0')!;
+  const track = page.locator(`[data-testid="timeline-row"][data-timeline-id="${timeline.id}"]`).getByTestId('timeline-track');
+  const token = await windowDrop(library, source, page, track, 320);
   await expect.poll(async () => (await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(timeline.itemIds.length + 1);
-  const created = Object.values((await snapshot(page)).document.items).find(candidate => !before.document.items[candidate.id]);
-  expect(created?.outputAssetId).toBe(asset.id);
-  expect(created?.referenceAssetIds).toEqual([]);
-  expect(created?.startTick).toBe(10000);
-  const reusable = page.locator(`[data-testid="reusable-item"][data-item-id="${created!.id}"]`);
-  const saveTransfer = await page.evaluateHandle(() => new DataTransfer());
-  await reusable.dispatchEvent('dragstart', { dataTransfer: saveTransfer });
-  await page.getByTestId('asset-library').dispatchEvent('dragover', { dataTransfer: saveTransfer });
-  await page.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: saveTransfer });
-  await expect.poll(async () => (await snapshot(page)).revision).toBeGreaterThan(before.revision + 1);
-  expect(Object.keys((await snapshot(page)).document.assets)).toHaveLength(1);
-  await saveTransfer.dispose();
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByTestId('asset-library')).toHaveCount(0);
-  await page.locator(`[data-testid="timeline-item"][data-item-id="${created!.id}"]`).click();
+  const placed = await snapshot(page);
+  const item = Object.values(placed.document.items).find(candidate => !before.document.items[candidate.id])!;
+  expect(item.outputAssetId).toBe(asset.id); expect(item.startTick).toBe(10000);
+  const itemView = page.locator(`[data-testid="timeline-item"][data-item-id="${item.id}"]`);
+  // A 200ms item occupies 6.4px of time but keeps a 24px hit area. Dragging
+  // its visible body must clamp the grip offset to its real duration.
+  const short = await page.request.post('/api/actions', { data: { requestId: crypto.randomUUID(), projectId: placed.document.id, expectedRevision: placed.revision,
+    type: 'item.resize', payload: { itemId: item.id, startTick: item.startTick, durationTicks: 200 } } });
+  expect((await short.json()).ok).toBe(true);
+  await expect.poll(async () => (await snapshot(page)).document.items[item.id]?.durationTicks).toBe(200);
+  const beforeReuse = await snapshot(page);
+  await windowDrop(page, itemView, library, library.getByTestId('asset-library'));
+  await expect.poll(async () => (await snapshot(page)).revision).toBe(beforeReuse.revision + 1);
+  const saved = await snapshot(page);
+  const forged = await page.evaluateHandle(value => { const data = new DataTransfer(); data.setData('application/x-pixel-object', value); return data; }, token);
+  const trackBox = await track.boundingBox();
+  await track.dispatchEvent('drop', { dataTransfer: forged, clientX: trackBox!.x + 400, clientY: trackBox!.y + 12 });
+  await forged.dispose();
+  expect(await snapshot(page)).toEqual(saved);
+  const restore = await page.request.post('/api/actions', { data: { requestId: crypto.randomUUID(), projectId: saved.document.id, expectedRevision: saved.revision,
+    type:'item.resize', payload:{itemId:item.id,startTick:item.startTick,durationTicks:item.durationTicks} } });
+  expect((await restore.json()).ok).toBe(true);
+  await expect.poll(async () => (await snapshot(page)).document.items[item.id]?.durationTicks).toBe(item.durationTicks);
+  await expect(library.getByTestId('relation-surface')).toHaveCount(0);
+  await expect(library.getByTestId('reusable-item')).toHaveCount(0);
+  await itemView.click();
   await expect(page.getByTestId('viewer').locator('img')).toHaveAttribute('src', `/api/media/${asset.id}`);
-  const beforeReopen = await snapshot(page);
-  await openLibrary(page);
-  await page.getByTestId('viewer').dispatchEvent('contextmenu', { clientX: 400, clientY: 160 });
-  await expect(page.getByRole('menu')).toHaveCount(0);
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  expect(await snapshot(page)).toEqual(beforeReopen);
+  await library.close();
 });
 
 test('播放指针点击、拖动和键盘定位联动预览，不改写项目，Modal 背景不能定位', async ({ page }) => {
@@ -360,8 +386,8 @@ test('播放指针点击、拖动和键盘定位联动预览，不改写项目�
 
 test('实际音频随播放指针定位素材时间，定位不会提交生成或项目编辑', async ({ page }) => {
   await openWorkbench(page);
-  await openLibrary(page);
-  const transfer = await page.evaluateHandle(() => {
+  const library = await openLibrary(page);
+  const transfer = await library.evaluateHandle(() => {
     const dataSize = 8000 * 2 * 2;
     const bytes = new Uint8Array(44 + dataSize);
     const view = new DataView(bytes.buffer);
@@ -374,16 +400,16 @@ test('实际音频随播放指针定位素材时间，定位不会提交生成�
     data.items.add(new File([bytes], 'scrub.wav', { type: 'audio/wav' }));
     return data;
   });
-  await page.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: transfer });
+  await library.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: transfer });
   await transfer.dispose();
-  await expect(page.getByTestId('asset-card').filter({ hasText: 'scrub.wav' })).toBeVisible();
+  await expect(library.getByTestId('asset-card').filter({ hasText: 'scrub.wav' })).toBeVisible();
   const before = await snapshot(page);
   const voice = Object.values(before.document.timelines).find(timeline => timeline.modelId === 'eleven_v4')!;
-  await scopedAssetDrop(page, 'scrub.wav', page.locator(`[data-testid="relation-track"][data-timeline-id="${voice.id}"]`), 4);
+  await windowDrop(library, library.getByTestId('asset-card').filter({ hasText: 'scrub.wav' }), page, page.locator(`[data-testid="timeline-row"][data-timeline-id="${voice.id}"]`).getByTestId('timeline-track'), 4);
   await expect.poll(async () => (await snapshot(page)).document.timelines[voice.id]?.itemIds.length).toBe(voice.itemIds.length + 1);
   const after = await snapshot(page);
   const placed = Object.values(after.document.items).find(item => !before.document.items[item.id])!;
-  await page.keyboard.press('Escape');
+  await library.close();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.locator(`[data-testid="timeline-item"][data-item-id="${placed.id}"]`).click();
   const audio = page.getByTestId('viewer').locator('audio');

@@ -23,7 +23,7 @@
 
 两条 GUI 路径具有不同前置对象和业务结果：从模型与时间位置发起生成草稿，从既有素材发起放置。`item.createDraft` 严格拒绝资产参数，`item.create` 要求资产；两者共享创建内核、插件校验、位置不变量和事务规则。已有项目数据及已保存的幂等记录不受影响。正式项目 CLI / Agent 接线时必须复用这些 Action 与校验；这些适配器尚未实现。
 
-资产库的唯一 GUI 进入路径为主 Viewer 右键 → 素材库，空预览及已有输出均可进入。按用户明确要求，该项登记为 P03 的局部导航例外：直接打开当前独立详情窗口或浏览器唯一 Modal 的根层，不创建业务 Action、不修改项目快照。项目标题双击仍进入项目对象详情，其中移除素材库旧入口。库内关系拖拽时，宿主在当前顶部详情作用域临时呈现已存在的 Timeline / Item 目标，复用 Asset → Timeline、Asset → Item 引用和 Item → Library 的既有角色路由；背景及旧详情层仍被隔离。上表也包含产品目标路径，例如项目文件拖入打开；当前完成状态以第 10 节为准。
+资产库的唯一 GUI 进入路径为主 Viewer 右键 → 素材库，空预览及已有输出均可进入。该项仍是 P03 的局部导航例外，不创建业务 Action、不修改项目快照。按用户再次纠正，1.3 将 workspace 与 library 设为非模态并行工作窗口，使用共同 `DesktopWindowHost`；打开素材库不得锁住主窗口。项目标题双击仍进入项目对象详情，其中没有素材库第二入口。库 Asset 直接拖到主 Timeline 时间位置或 Item 引用区，主 Item 直接拖到库保存复用，经可信 broker 执行原角色路由和 Action；桌面移除库内镜像时间线与输出替代来源。上表也包含产品目标路径，例如项目文件拖入打开；当前完成状态以第 10 节为准。
 
 对象关系保持浅层：
 
@@ -48,10 +48,11 @@ ProjectDocument
 | 前端 | `ActionClient` | 校验显式请求、通过桥接接口提交动作 | 推断选择对象、自动重试、声明调用者权限 |
 | 前端 | `ProjectProjectionStore` | 维护后端快照的镜像、处理 revision 与重新读取 | 持久化、业务校验、撤销历史 |
 | 前端 | `ModalNavigator` | 保存唯一详情 path，管理 push/pop 和 Esc 返回 | 执行业务动作、全局项目状态 |
+| 窗口宿主 | `DesktopWindowHost` | 统一工作窗口创建、外观、控制与生命周期；按所属窗口管理局部详情 | 把所有独立工作窗口都变成应用级 Modal |
 | 前端 | `ContextActionRegistry` | 从对象上下文收集右键语义命令及可用状态 | 作为后端权限检查的替代 |
 | 前端 | `DragRegistry` | 将有效拖拽关系转换为统一动作 | 自行访问文件或绕过 Action System |
 | 前端 | `GuiActionPathRegistry` | 宿主统一登记一个动作的唯一 GUI 路径 | 限制 CLI 或 Agent 调用动作 |
-| 前端契约 | `NativeDragBroker` | 定义跨窗口拖拽会话的创建、解析、结束 | 已完成的原生拖拽实现 |
+| 跨窗口宿主 | `ObjectDragBroker` / `browserWindowHost` | 可信会话的创建、解析、单次消费与结束；绑定来源和目标窗口 | 第二套业务 Action 或可写项目状态 |
 | 后端 | `BaseActionHandler` | 约束单个动作的输入校验、权限和项目更新流程 | IPC、React、模型轮询 |
 | 后端 | `ActionRegistry` | 按动作 type 注册唯一处理器 | 右键菜单与页面布局 |
 | 后端 | `ActionExecutor` | 统一执行入口，协调 revision、幂等、事务和变更通知 | 了解具体 UI 手势 |
@@ -133,7 +134,7 @@ GUI、正式项目 CLI 和 Agent 的架构约束是提交相同 `ActionEnvelope`
 
 前端镜像发生缺口、窗口恢复或动作返回冲突时，重新拉取快照。当前 `ProjectProjectionStore.start()` 先订阅，再读取完整快照；收到更高 revision 的 `project.changed` 后调用 `refresh()`。已知更高 revision 后返回的旧快照会被丢弃，避免乱序响应回滚镜像。后续只有在项目规模需要时才增加带 base revision 的 patch 协议。前端不得用“手势完成”证明后端已经提交；请求回执和投影读取是两个不同步骤。
 
-`DesktopBridge` 的领域契约为 `dispatch(envelope)`、`readProject(projectId)` 和 `subscribeProject(projectId, listener)`。当前浏览器及桌面通过 `HttpDesktopBridge` 使用同一后端 API，桌面额外验证宿主签发的会话 Cookie。preload 只暴露窗口操作、详情打开及受控导出方法，使用 `ipcRenderer.invoke` / `ipcMain.handle` 等固定 channel，不暴露任意 channel 的 `ipcRenderer`。此边界遵循 [Electron 官方 IPC 文档](https://www.electronjs.org/docs/latest/tutorial/ipc) 的窄接口模式。
+`DesktopBridge` 的领域契约为 `dispatch(envelope)`、`readProject(projectId)` 和 `subscribeProject(projectId, listener)`。当前浏览器及桌面通过 `HttpDesktopBridge` 使用同一后端 API，桌面额外验证宿主签发的会话 Cookie。1.3 的 preload 沿用窄接口，只暴露宿主定义的窗口/库打开、受控跨窗口会话及文件导出方法，使用固定 IPC channel，不暴露任意 channel 的 `ipcRenderer`。此边界遵循 [Electron 官方 IPC 文档](https://www.electronjs.org/docs/latest/tutorial/ipc) 的窄接口模式；新增工作窗口和 broker 已通过本轮浏览器及原生验证。
 
 可信宿主/服务入口校验调用来源、项目访问资格和请求体，再构造 `CallerContext`，包含受信任的 `actorId`、`source`、`projectIds` 和权限集合。Electron 主进程校验窗口 IPC sender；当前 HTTP Action 的调用身份由 `Workbench` 服务入口注入。执行器在提交前检查项目访问资格与 handler 的 `authorize()`，幂等重放也经过这一步。renderer 提供的身份、权限或 `internal` 标志都不是授权依据。正式 CLI 和 Agent 接线时也必须由可信入口构造上下文。provider 凭证和任意文件路径留在后端；`AssetData.fileRef` 是由后端解析的句柄。
 
@@ -257,15 +258,19 @@ Timeline 插件只声明语义：支持的 item kind、默认数据、字段 sch
 
 Zod schema、方法和 provider 实例属于进程内的 registry，不能直接存入项目文件。项目中只存插件 ID、版本和 JSON 参数。第一阶段插件是随应用发布的可信代码；第三方插件执行隔离、签名及权限系统尚未实现，不把普通 TypeScript 基类视为沙箱。
 
-## 9. Modal 与拖拽隔离
+## 9. 并行工作窗口、对象详情与跨窗口拖拽
 
-每个窗口只有一个 `ModalHost`，其内容由 `ModalNavigator.path` 最后一项决定。双击子对象执行 push，Esc 执行 pop，空 path 关闭 Host；详情内部继续导航仍使用同一 Host。数据需要保存时通过 Action System 提交，path 本身不代表提交。未提交表单的离开规则应由宿主统一定义。
+1.3 将主工作窗口和素材库明确为非模态并行工作窗口。共同 `DesktopWindowHost` 组合 `BrowserWindow` 管理创建与生命周期，前端 `PixelWindowHost` 统一窗口外观和控制。打开素材库只创建或聚焦该工作窗口，不锁住主窗口；窗口各自维护投影和局部导航，业务权威状态仍只有后端一份。此前把独立素材工作窗口一律解释为 Modal 对象详情是错误理解。
 
-Modal 的 path、局部选中和表单状态只属于当前窗口。每个 `ModalFrame` 有独立 `scopeId`，当前 `isInteractive()` 只允许顶部 frame；无 Modal 时只允许工作区 scope。宿主将该检查用于背景右键、拖拽和编辑快捷键，防止同一次 drop 误改背景时间线。`reconcile()` 在对象删除后退回仍存在的祖先。Radix 可以用于焦点约束与弹层，但业务导航仍由 path 管理。
+每个所属工作窗口有独立对象详情导航，一条 `ModalNavigator.path` 决定一个 `ModalHost` 的顶部内容。双击子对象执行 push，Esc 执行 pop，空 path 关闭详情；详情内部继续导航仍使用同一 Host。详情只隔离所属工作窗口的背景及旧层，不禁用其他独立工作窗口。数据通过 Action System 提交，导航 path 本身不代表提交。未提交表单的离开规则由宿主统一定义。
 
-资产库从 Viewer 菜单直接作为详情 path 的根层打开，无菜单或子层时 Esc 关闭；双击库内对象推进子层，Esc 返回库。打开和关闭是宿主局部导航，不进入项目 Action 或 revision。拖入素材、展示已有对象的关系目标、hover 及 drop 都带当前顶部 `scopeId`；新引用或放置仍通过同一个 `DragRegistry` 转成 Action。支持引用且存在关系或合法拖拽时才显示引用区，不支持引用的模型不显示该能力。库内的来源与目标位于同一个活动窗口，不依赖解除背景隔离，也不等于已实现 `NativeDragBroker`。本次入口调整不迁移既有项目，已通过类型检查、12 项浏览器交互测试及原生桌面验证；具体验证范围见[哲学对齐记录](philosophy-alignment.zh-CN.md)。
+Modal 的 path、局部选中和表单状态只属于当前窗口。每个 `ModalFrame` 有独立 `scopeId`，`isInteractive()` 只允许该窗口顶部 frame；无对象详情时允许该工作窗口的根作用域。宿主把来源和目标各自的作用域检查用于右键、拖拽和编辑快捷键，防止 drop 越过所属窗口的对象详情改背景。另一个非模态工作窗口可继续作为合法来源或目标。`reconcile()` 在对象删除后退回仍存在的祖先；导航由 path 管理，不由 UI 库默认的应用级模态行为决定。
 
-单窗口中的 dnd-kit 可管理手势；跨窗口拖拽不能共享一份 React 拖拽内存。当前 `NativeDragBroker` 仅是待实现契约：`begin()` 创建带过期时间的会话，DataTransfer 携带 session token，接收窗口 `resolve()` 用于 hover 预览；drop 必须调用 `consume()` 原子解析并消费 token，`end()` 负责结束及取消清理。来源和接收窗口身份由可信 IPC sender 绑定，后端在 drop 时重新校验对象存在、权限、来源与目标兼容性，再生成同一种动作。payload 不携带 provider 凭证、任意文件路径或可执行闭包。跨项目引用需要定义为复制/导入动作，不能直接保存指向另一项目的悬空 ID。
+素材库从 Viewer 菜单直接打开独立非模态工作窗口，其根是素材列表，没有 `ModalNavigator` 根 frame。库内双击对象在库 document 中进入单一 ModalHost 的局部详情，只隔离库 document，主窗口仍工作；详情 Esc 返回库，库根 Esc / close 关闭窗口。真实库 Asset → 主 Timeline 执行放置或 Item 引用，主 Item → 库执行保存复用；不在库内复制 `relation-surface` 或可复用输出来源作为关系替代面。跨窗口关系经目标窗口自己的 `DragRegistry` 构造原 Action，支持引用且有已有关系或合法拖拽时才显示引用区。打开/关闭库不进入项目 Action 或 revision，不迁移既有项目。
+
+跨窗口拖拽不能共享一份 React 拖拽内存。实际桌面适配器为 `electron/object-drag-broker.mjs` 的 `ObjectDragBroker`，通过 preload 的 `beginObjectDrag()` 创建限时会话，`resolveObjectDrag()` 验证 hover，`finishObjectDrag()` 在合法 drop 时原子解析并单次消费，`endObjectDrag()` 结束或取消。开始、解析与消费使用窄同步 IPC，以满足 dragstart 设置 DataTransfer 和 hover/drop 的同步时机；结束清理为异步，并给 Chromium 跨 renderer 的 dragend/drop 顺序保留 350ms 宽限。DataTransfer 只携带不透明 token，来源窗口由可信 IPC sender 绑定，主进程核验窗口存活、交互资格、同项目、当前对象与偏移；过期、来源关闭、对象删除或作用域失效均清理会话。目标自己的 `DragRegistry` 检查角色与作用域，后端执行时仍校验权限、媒体类型和位置约束，最终执行既有 Action。`src/frontend.ts` 的 `NativeDragBroker` 是早期异步设计契约，并非当前 preload 的具体接口。payload 不携带凭证、任意文件路径或闭包；跨项目复制/导入尚未定义，不接受悬空 ID。类型检查、96 项核心测试、12 项浏览器交互测试及原生桌面验证均通过。
+
+浏览器开发版确定使用同源独立 popup（`?window=library`），复用同一 App / `PixelWindowHost`，不使用同 document 浮动库；最小化等平台窗口操作由浏览器系统负责。浏览器开发会话经同源窗口注册 hub 验证，DataTransfer 同样只传不透明 token，目标使用自身 `DragRegistry` 与 Action；不把开发版 hub 当作桌面可信主进程。该方案与原生 broker 均已通过本轮运行验证。
 
 Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖拽”的路径。`electron/export-tickets.mjs` 已实现当前媒体文件的提前准备，确认真实文件后签发绑定窗口、限时及单次使用的 ticket；用户开始拖拽时，主进程消费 ticket 后调用 `webContents.startDrag({ file, icon })`。完整时间线的合成导出仍待实现。Electron 的原生文件拖拽需要文件与图标，见 [Electron 官方 Native File Drag & Drop 文档](https://www.electronjs.org/docs/latest/tutorial/native-file-drag-drop)。不要等文件拖到外部应用以后才异步生成或导出文件。准备中显示对象状态，并暂时不允许拖出。
 
@@ -286,8 +291,8 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 | Timeline 插件、视频示例及五真实模型语义目录 | 已实现纯构造、字段/schema/defaults、有界查询与统一 GUI 字段宿主 |
 | 模型 provider 执行模板及两官方 SDK 适配器 | 已实现总超时、取消、脱敏错误、产物守卫；模拟 HTTP 验证 |
 | 任务状态转换、attempt 及结果有效性纯检查 | 已实现 |
-| React Timeline、ModalHost、Viewer | 默认仅 Viewer + Timeline；已实现逐层详情、右键、字段、移动/边缘拖拽及顶部库作用域内导入/放置/引用/复用；完整合成播放待实现 |
-| Electron main/preload、窗口隔离和跨窗口拖拽 | 原生主窗口、独立详情窗口、窄 preload 及父窗口隔离已实现；跨窗口对象 broker 待实现 |
+| React Timeline、ModalHost、Viewer | 默认仅 Viewer + Timeline；逐层详情、右键、字段、移动/边缘拖拽、时间定位与独立库已实现；浏览器采用同源 popup，真实窗口关系及局部详情隔离已通过验证；完整合成播放待实现 |
+| Electron 窗口宿主及跨窗口拖拽 | 共同 `DesktopWindowHost`、非模态 workspace/library、窄 preload 与 `ObjectDragBroker` 已实现；真实窗口间放置、引用和复用及局部详情隔离已通过原生验证 |
 | 任务/文件持久化及 Wan 远端任务恢复 | 已实现文件 ledger、产物存储和 runner run/resume；单后端进程 |
 | 项目持久化、token 与 job/outbox 联合事务、自动调度 | 单机文件工作台已实现；事务保存 outbox 后消费，含启动恢复及旧结果守卫 |
 | 插件 schema 版本迁移器与缺失插件占位 UI | 仅设计 |
@@ -300,7 +305,6 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 1. 增加项目文件拖入打开、版本迁移与缺失插件占位。
 2. 实现项目 undo/redo 的受控重放及 token 更新。
 3. 实现完整 Timeline 合成播放与导出，沿用 Viewer 唯一原生拖出手势。
-4. 根据跨窗口对象关系的实际需求实现 `NativeDragBroker`，保持原生 Modal 背景隔离。
-5. 扩展 Agent 能力发现与可信适配器，继续复用 Action 与业务规则。
+4. 扩展 Agent 能力发现与可信适配器，继续复用 Action 与业务规则。
 
 第一版不需要微服务、通用工作流图或复杂继承系统。已有边界足以在单机 Electron 后端内逐步扩展，后续迁移远程生成服务时仍保留同一动作与任务契约。

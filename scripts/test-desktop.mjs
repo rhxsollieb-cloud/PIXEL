@@ -18,6 +18,10 @@ const envFor = directory => {
   return env;
 };
 const snapshot = page => page.evaluate(async () => (await fetch('/api/project')).json());
+const executeAction = (page, type, payload) => page.evaluate(async ({type, payload}) => {
+  const state = await (await fetch('/api/project')).json();
+  return (await fetch('/api/actions', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requestId:crypto.randomUUID(), projectId:state.document.id, expectedRevision:state.revision, type, payload }) })).json();
+}, {type, payload});
 const launch = async directory => {
   await mkdir(join(directory, 'desktop-profile'), { recursive: true });
   const application = await _electron.launch({ args: [testEntry], cwd: root, env: envFor(directory), timeout: 30000 });
@@ -25,6 +29,39 @@ const launch = async directory => {
   application.context().setDefaultTimeout(15000);
   return application;
 };
+async function nativeWindowDrop(sourcePage, source, targetPage, target, x, expectedOffset) {
+  const receiver = await targetPage.context().newCDPSession(targetPage);
+  await sourcePage.evaluate(() => {
+    window.__pixelMouseObjectToken = '';
+    document.addEventListener('dragstart', event => { window.__pixelMouseObjectToken = event.dataTransfer.getData('application/x-pixel-object'); }, { once: true });
+  });
+  try {
+    const sourceBox = await source.boundingBox(); assert.ok(sourceBox);
+    await sourcePage.bringToFront();
+    await sourcePage.mouse.move(sourceBox.x + 12, sourceBox.y + 12);
+    await sourcePage.mouse.down();
+    await sourcePage.mouse.move(sourceBox.x + 40, sourceBox.y + 12, { steps: 5 });
+    const token = await sourcePage.evaluate(() => window.__pixelMouseObjectToken);
+    assert.ok(token, 'A real mouse dragstart must put the opaque session in DataTransfer');
+    if (expectedOffset !== undefined) assert.equal(await sourcePage.evaluate(token => window.pixelDesktop.resolveObjectDrag(token)?.offsetTicks, token), expectedOffset);
+    await expect(target).toBeVisible();
+    const box = await target.boundingBox(); assert.ok(box);
+    const before = await snapshot(targetPage);
+    const unrelated = await targetPage.evaluateHandle(() => new DataTransfer());
+    await target.dispatchEvent('drop', {dataTransfer:unrelated,clientX:box.x+x,clientY:box.y+12});
+    await unrelated.dispose();
+    assert.deepEqual(await snapshot(targetPage), before);
+    assert.ok(await targetPage.evaluate(token => window.pixelDesktop.resolveObjectDrag(token), token));
+    const data = { items: [{ mimeType: 'application/x-pixel-object', data: token }], dragOperationsMask: 17 };
+    for (const type of ['dragEnter', 'dragOver', 'drop']) {
+      await receiver.send('Input.dispatchDragEvent', { type, x: box.x + x, y: box.y + 12, data });
+    }
+    assert.equal(await targetPage.evaluate(token => window.pixelDesktop.finishObjectDrag(token), token), undefined);
+  } finally {
+    await sourcePage.mouse.up().catch(() => {});
+    await receiver.detach();
+  }
+}
 let desktop;
 try {
   await mkdir(screenshots, { recursive: true });
@@ -55,17 +92,17 @@ try {
   await expect(emptyWorkspace.getByRole('menuitem')).toHaveCount(1);
   await emptyWorkspace.getByRole('menuitem', { name: '素材库', exact: true }).click();
   const emptyLibrary = await emptyLibraryWindow;
-  await expect(emptyLibrary.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
+  await expect(emptyLibrary.getByTestId('library-window')).toBeVisible();
   await expect(emptyLibrary.getByTestId('asset-library')).toContainText('拖入素材');
-  assert.equal(new URL(emptyLibrary.url()).searchParams.get('view'), 'library');
+  assert.equal(new URL(emptyLibrary.url()).searchParams.get('window'), 'library');
   assert.deepEqual(await snapshot(emptyLibrary), emptyProject);
   assert.equal(await desktop.evaluate(({ BrowserWindow }) => {
     const windows = BrowserWindow.getAllWindows();
-    return windows.length === 2 && windows.some(window => window.isModal() && window.getParentWindow())
-      && !windows.find(window => !window.getParentWindow()).isEnabled();
+    return windows.length === 2 && windows.every(window => !window.isModal() && !window.getParentWindow() && window.isEnabled());
   }), true);
   await emptyWorkspace.getByTestId('viewer').dispatchEvent('contextmenu', { clientX: 200, clientY: 200 });
-  await expect(emptyWorkspace.getByRole('menu')).toHaveCount(0);
+  await expect(emptyWorkspace.getByRole('menuitem', { name: '素材库', exact: true })).toBeVisible();
+  await emptyWorkspace.keyboard.press('Escape');
   const emptyLibraryClosed = emptyLibrary.waitForEvent('close');
   await emptyLibrary.keyboard.press('Escape').catch(error => { if (!emptyLibrary.isClosed()) throw error; });
   await emptyLibraryClosed;
@@ -213,15 +250,17 @@ try {
   await workspace.getByTestId('viewer').click({ button: 'right', position: { x: 120, y: 120 } });
   await workspace.getByRole('menuitem', { name: '素材库', exact: true }).click();
   const libraryPage = await libraryWindow;
-  await expect(libraryPage.getByRole('dialog', { name: '素材库', exact: true })).toBeVisible();
-  await expect(libraryPage.getByRole('dialog')).toHaveCount(1);
+  await expect(libraryPage.getByTestId('library-window')).toBeVisible();
+  await expect(libraryPage.getByRole('dialog')).toHaveCount(0);
   assert.equal(desktop.windows().length, 2);
-  assert.equal(await desktop.evaluate(({ BrowserWindow }) => {
-    const windows = BrowserWindow.getAllWindows();
-    return windows.length === 2 && windows.some(window => window.isModal() && window.getParentWindow());
-  }), true);
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().every(window => !window.isModal() && !window.getParentWindow() && window.isEnabled())), true);
+  await libraryPage.getByRole('button', { name: '最小化', exact: true }).click();
+  await expect.poll(() => desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => new URL(window.webContents.getURL()).searchParams.get('window') === 'library').isMinimized())).toBe(true);
+  assert.equal(await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => !new URL(window.webContents.getURL()).searchParams.has('window')).isEnabled()), true);
+  await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => new URL(window.webContents.getURL()).searchParams.get('window') === 'library').restore());
   await workspace.getByTestId('timeline-workspace').dispatchEvent('contextmenu', { clientX: 400, clientY: 800 });
-  await expect(workspace.getByRole('menu')).toHaveCount(0);
+  await expect(workspace.getByRole('menuitem', { name: '新建时间线', exact: true })).toBeVisible();
+  await workspace.keyboard.press('Escape');
   await expect(workspace.getByTestId('asset-library')).toHaveCount(0);
   const fileTransfer = await libraryPage.evaluateHandle(() => {
     const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), character => character.charCodeAt(0));
@@ -239,29 +278,27 @@ try {
   const assetId = importedAsset.id;
   const grokTimeline = Object.values(beforePlacement.document.timelines).find(timeline => timeline.modelId === 'x-ai/grok-imagine-image-2.0');
   assert.ok(grokTimeline);
-  const scope = await libraryPage.getByTestId('asset-library').getAttribute('data-scope-id');
-  assert.ok(scope);
-  const relationTransfer = await libraryPage.evaluateHandle(() => new DataTransfer());
-  const sourceBox = await source.boundingBox();
-  assert.ok(sourceBox);
-  await source.dispatchEvent('dragstart', { dataTransfer: relationTransfer, clientX: sourceBox.x + 12, clientY: sourceBox.y + 12 });
-  const target = libraryPage.locator(`[data-testid="relation-track"][data-timeline-id="${grokTimeline.id}"]`);
-  await expect(target).toBeVisible();
-  await expect(target).toHaveAttribute('data-scope-id', scope);
-  await expect(target).toHaveAttribute('aria-disabled', 'false');
-  await libraryPage.evaluate(() => document.fonts.ready);
+  const staleSession = await libraryPage.evaluate(assetId => window.pixelDesktop.beginObjectDrag({role:'asset',payload:{object:{kind:'asset',projectId:'pixel-project',id:assetId}}},0), assetId);
+  assert.ok(staleSession);
+  assert.ok(await workspace.evaluate(token => window.pixelDesktop.resolveObjectDrag(token), staleSession));
+  await libraryPage.reload();
+  await expect(source).toBeVisible();
+  assert.equal(await workspace.evaluate(token => window.pixelDesktop.resolveObjectDrag(token), staleSession), undefined);
+  assert.equal(await workspace.evaluate(token => window.pixelDesktop.finishObjectDrag(token), staleSession), undefined);
+  await source.dblclick();
+  await expect(libraryPage.getByRole('dialog', { name: '素材详情', exact: true })).toBeVisible();
+  await expect(libraryPage.getByTestId('library-window')).toHaveAttribute('inert', '');
+  await workspace.getByTestId('timeline-ruler').click({ position: { x: 64, y: 8 } });
+  await expect(workspace.getByTestId('timeline-ruler')).toHaveAttribute('aria-valuenow', '2000');
+  await libraryPage.keyboard.press('Escape');
+  await expect(libraryPage.getByRole('dialog')).toHaveCount(0);
   const libraryCapture = await desktop.evaluate(async ({ BrowserWindow }) => {
-    const window = BrowserWindow.getAllWindows().find(candidate => candidate.getParentWindow());
+    const window = BrowserWindow.getAllWindows().find(candidate => new URL(candidate.webContents.getURL()).searchParams.get('window') === 'library');
     return (await window.webContents.capturePage()).toPNG().toString('base64');
   });
   await writeFile(join(screenshots, 'desktop-library.png'), Buffer.from(libraryCapture, 'base64'));
-  const targetBox = await target.boundingBox();
-  assert.ok(targetBox);
-  const dropEvent = { dataTransfer: relationTransfer, clientX: targetBox.x + 320, clientY: targetBox.y + 12 };
-  await target.dispatchEvent('dragover', dropEvent);
-  await target.dispatchEvent('drop', dropEvent);
-  await source.dispatchEvent('dragend', { dataTransfer: relationTransfer });
-  await relationTransfer.dispose();
+  const target = workspace.locator(`[data-testid="timeline-row"][data-timeline-id="${grokTimeline.id}"]`).getByTestId('timeline-track');
+  await nativeWindowDrop(libraryPage, source, workspace, target, 320);
   await expect.poll(async () => (await snapshot(libraryPage)).document.timelines[grokTimeline.id].itemIds.length).toBe(grokTimeline.itemIds.length + 1);
   const afterPlacement = await snapshot(libraryPage);
   const outputItem = Object.values(afterPlacement.document.items).find(item => !beforePlacement.document.items[item.id]);
@@ -269,10 +306,53 @@ try {
   assert.equal(outputItem.outputAssetId, assetId);
   assert.deepEqual(outputItem.referenceAssetIds, []);
   assert.equal(outputItem.startTick, 10000);
-  await expect(libraryPage.getByRole('dialog')).toHaveCount(1);
+  await expect(libraryPage.getByRole('dialog')).toHaveCount(0);
   assert.equal(desktop.windows().length, 2);
-  await workspace.getByTestId('timeline-workspace').dispatchEvent('contextmenu', { clientX: 400, clientY: 800 });
-  await expect(workspace.getByRole('menu')).toHaveCount(0);
+  const mainItem = workspace.locator(`[data-testid="timeline-item"][data-item-id="${outputItem.id}"]`);
+  // Keep a result at library-local time zero to catch accidental Viewer export
+  // preparation from libraryMode, and exercise a tiny item's minimum hit area.
+  const resized = await executeAction(workspace, 'item.resize', {itemId:outputItem.id, startTick:outputItem.startTick, durationTicks:200});
+  assert.equal(resized.ok, true);
+  await expect.poll(async () => (await snapshot(workspace)).document.items[outputItem.id].durationTicks).toBe(200);
+  const beforeReuse = await snapshot(workspace);
+  await nativeWindowDrop(workspace, mainItem, libraryPage, libraryPage.getByTestId('asset-library'), 12, 200);
+  await expect.poll(async () => (await snapshot(workspace)).revision).toBe(beforeReuse.revision + 1);
+  assert.equal((await executeAction(workspace, 'item.delete', {itemId:grokTimeline.itemIds[0]})).ok, true);
+  const restored = await executeAction(workspace, 'item.resize', {itemId:outputItem.id, startTick:0, durationTicks:outputItem.durationTicks});
+  assert.equal(restored.ok, true);
+  await expect.poll(async () => (await snapshot(libraryPage)).document.items[outputItem.id].startTick).toBe(0);
+  await expect(libraryPage.getByText('输出文件尚未准备好', {exact:true})).toHaveCount(0);
+  const backToPlacement = await executeAction(workspace, 'item.resize', {itemId:outputItem.id, startTick:outputItem.startTick, durationTicks:outputItem.durationTicks});
+  assert.equal(backToPlacement.ok, true);
+  const wanTimeline = Object.values(beforeReuse.document.timelines).find(t => t.modelId === 'alibaba/wan-3.0');
+  const wanItem = workspace.locator(`[data-testid="timeline-item"][data-item-id="${wanTimeline.itemIds[0]}"]`);
+  await nativeWindowDrop(libraryPage, source, workspace, wanItem.getByTestId('item-reference-drop'), 12);
+  await expect.poll(async () => (await snapshot(workspace)).document.items[wanTimeline.itemIds[0]].referenceAssetIds).toContain(assetId);
+  assert.equal((await executeAction(workspace, 'item.reference.remove', {itemId:wanTimeline.itemIds[0],assetId})).ok, true);
+  await expect.poll(async () => (await snapshot(workspace)).document.items[wanTimeline.itemIds[0]].referenceAssetIds).toEqual([]);
+  const targetDetailPromise = desktop.waitForEvent('window');
+  await wanItem.dblclick({position:{x:70,y:24}});
+  const targetDetail = await targetDetailPromise;
+  await expect(targetDetail.getByRole('dialog', {name:'片段详情',exact:true})).toBeVisible();
+  await nativeWindowDrop(libraryPage, source, targetDetail, targetDetail.getByTestId('item-reference'), 12);
+  await expect.poll(async () => (await snapshot(workspace)).document.items[wanTimeline.itemIds[0]].referenceAssetIds).toContain(assetId);
+  const targetDetailClosed = targetDetail.waitForEvent('close');
+  await targetDetail.getByRole('button', {name:'关闭窗口',exact:true}).click().catch(error => {if(!targetDetail.isClosed())throw error;});
+  await targetDetailClosed;
+  const beforeForgery = await snapshot(workspace);
+  const forged = await workspace.evaluateHandle(() => { const data = new DataTransfer(); data.setData('application/x-pixel-object', 'forged-session'); return data; });
+  const dropBox = await target.boundingBox();
+  await target.dispatchEvent('drop', { dataTransfer: forged, clientX: dropBox.x + 480, clientY: dropBox.y + 12 });
+  await forged.dispose();
+  assert.deepEqual(await snapshot(workspace), beforeForgery);
+  // Unreference before the later asset.remove export-ticket ownership regression.
+  const unlink = await workspace.evaluate(async ({itemId, assetId}) => {
+    const state = await (await fetch('/api/project')).json();
+    return (await fetch('/api/actions', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ requestId:crypto.randomUUID(), projectId:state.document.id, expectedRevision:state.revision, type:'item.reference.remove', payload:{itemId,assetId} }) })).json();
+  }, {itemId:wanTimeline.itemIds[0], assetId});
+  assert.equal(unlink.ok, true);
+  await expect(libraryPage.getByTestId('relation-surface')).toHaveCount(0);
+  await expect(libraryPage.getByTestId('reusable-item')).toHaveCount(0);
   const libraryClosed = libraryPage.waitForEvent('close');
   await libraryPage.keyboard.press('Escape').catch(error => { if (!libraryPage.isClosed()) throw error; });
   await libraryClosed;
@@ -336,7 +416,7 @@ try {
   assert.equal(removal.ok, true);
   await workspace.evaluate(async ticket => { window.pixelDesktop.startExport(ticket); await window.pixelDesktop.isMaximized(); }, removedGrant.ticket);
   assert.equal(await desktop.evaluate(() => globalThis.__pixelNativeDrags.length), 3);
-  console.log('PIXEL_DESKTOP_UI_OK: empty production project, contextual library, scoped asset placement, native modal isolation, real window-control clicks, minimize/restore with preserved owner state, timeline scrubbing and preview, nested Esc, Action persistence, shared projection, close and reopen, owned-file export and forged/replayed ticket rejection');
+  console.log('PIXEL_DESKTOP_UI_OK: empty production project, nonmodal library, real mouse-started Chromium cross-window asset placement/reference/item reuse, scoped details, window controls, timeline scrubbing, persistence, shared projection, owned-file export and forged/replayed ticket rejection');
 } finally {
   if (desktop) await desktop.close();
   for (const directory of [emptyStorage, storage]) {

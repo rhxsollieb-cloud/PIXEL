@@ -4,11 +4,12 @@ import { ActionClient, ProjectProjectionStore, type DragSource, type DragTarget 
 import type { ModelDeclaration } from '../src/models.js';
 import type { PluginFieldDeclaration } from '../src/plugins.js';
 import { HttpDesktopBridge, assetUrl } from './bridge.js';
-import { initialDetailObject, initialDetailView } from './desktop.js';
+import { initialDetailObject, type DesktopObjectDrag } from './desktop.js';
+import { browserWindowHost } from './browser-window.js';
 import { createInteractionHost } from './interaction.js';
 import { clampPlaybackMs, itemAtPlaybackTime, playbackTimeLabel, sourcePlaybackSeconds } from './playback.js';
 import { atPath, defaultFromSchema, FieldEditor, fieldLabel, schemaAtPath, withPath, type FieldPath } from './fields.js';
-import { PixelBadge, PixelContextMenu, PixelEmpty, PixelField, PixelIcon, PixelInput, PixelModalHost, PixelPanel, PixelProgress, type PixelContextMenuItem } from './ui/index.js';
+import { PixelBadge, PixelContextMenu, PixelEmpty, PixelField, PixelIcon, PixelInput, PixelModalHost, PixelPanel, PixelProgress, PixelWindowHost, type PixelContextMenuItem } from './ui/index.js';
 
 const PROJECT_ID = 'pixel-project';
 const MIME = 'application/x-pixel-object';
@@ -52,7 +53,8 @@ function MediaPreview({asset,large = false,seekSeconds,scrubbing}: {asset:DeepRe
 
 export function App() {
   const desktop = window.pixelDesktop;
-  const detailMode = desktop?.isDetailWindow === true;
+  const libraryMode = desktop?.isLibraryWindow === true || (!desktop && new URLSearchParams(location.search).get('window') === 'library');
+  const detailMode = desktop?.isDetailWindow === true && !libraryMode;
   const [models,setModels] = useState<ModelDeclaration[]>([]);
   const [jobs,setJobs] = useState<GenerationJob[]>([]);
   const modelsRef=useRef(models);modelsRef.current=models;
@@ -62,10 +64,11 @@ export function App() {
   const [client]=useState(()=>new ActionClient(bridge));
   const [host]=useState(()=>{
     const interaction = createInteractionHost(PROJECT_ID,()=>modelsRef.current,()=>jobsRef.current);
-    const object = initialDetailObject();
+    const object = libraryMode ? undefined : initialDetailObject();
     if (object) interaction.navigator.open(object);
     return interaction;
   });
+  const [windows]=useState(()=>desktop ?? browserWindowHost({snapshot:()=>store.getSnapshot(),interactive:()=>host.navigator.isInteractive(undefined)}));
   const snapshot=useSyncExternalStore(listener=>store.subscribe(listener),()=>store.getSnapshot());
   const path=useSyncExternalStore(listener=>host.navigator.subscribe(listener),()=>host.navigator.getPath());
   const [pending,setPending]=useState(0);
@@ -76,17 +79,13 @@ export function App() {
   const rulerRef=useRef<HTMLDivElement | null>(null);
   const finishScrub=useRef<(()=>void) | undefined>(undefined);
   const [menu,setMenu]=useState<{x:number;y:number;items:PixelContextMenuItem[]} | undefined>();
-  const [dragging,setDragging]=useState<{source:DragSource;offsetTicks:number} | undefined>();
+  const [dragging,setDragging]=useState<DesktopObjectDrag | undefined>();
+  const sourceSession=useRef<string | undefined>(undefined);
   const [dropHint,setDropHint]=useState<{id:string;tick:number;valid:boolean} | undefined>();
   const [resize,setResize]=useState<{id:string;startTick:number;durationTicks:number} | undefined>();
   const [exportTicket,setExportTicket]=useState<{assetId:string;ticket:string} | undefined>();
   const [exportRefresh,setExportRefresh]=useState(0);
-  const [fieldPaths]=useState(()=>{
-    const paths=new Map<string,FieldPath>();
-    const frame=host.navigator.current();
-    if(frame && initialDetailView()==='library')paths.set(frame.scopeId,['$library']);
-    return paths;
-  });
+  const [fieldPaths]=useState(()=>new Map<string,FieldPath>());
   const current=path.at(-1);
   const document=snapshot?.document;
   const timelines=Object.values(document?.timelines ?? {});
@@ -103,8 +102,10 @@ export function App() {
   const maximumPlaybackMs=trackWidth/PX_PER_SECOND*1000;
 
   useEffect(()=>{setPlayheadMs(position=>clampPlaybackMs(position,maximumPlaybackMs));},[maximumPlaybackMs]);
-  useEffect(()=>{if(path.length)finishScrub.current?.();},[path.length]);
+  useEffect(()=>{if(path.length){finishScrub.current?.();endDrag();}},[path.length]);
   useEffect(()=>()=>{finishScrub.current?.();},[]);
+  useEffect(()=>windows.onObjectDrag(value=>{setDragging(value);if(!value)setDropHint(undefined);}),[windows]);
+  useEffect(()=>{if(libraryMode&&!current)globalThis.document.querySelector<HTMLElement>('[data-testid="library-window"]')?.focus();},[libraryMode,current]);
 
   useEffect(()=>{
     if(!feedback.text || feedback.error)return;
@@ -113,14 +114,14 @@ export function App() {
   },[feedback]);
 
   useEffect(()=>{
-    if (!desktop || detailMode) return;
+    if (!desktop || detailMode || libraryMode) return;
     return desktop.onDetailsClosed(()=>{ host.navigator.reset(); setMenu(undefined); });
-  },[desktop,detailMode,host]);
+  },[desktop,detailMode,libraryMode,host]);
   useEffect(()=>{
     if (detailMode && !path.length) desktop?.close();
   },[desktop,detailMode,path.length]);
   useEffect(()=>{
-    if (!desktop || detailMode || !selectedAsset) { setExportTicket(undefined); return; }
+    if (!desktop || detailMode || libraryMode || !selectedAsset) { setExportTicket(undefined); return; }
     let active = true;
     const assetId = selectedAsset.id;
     setExportTicket(undefined);
@@ -132,7 +133,7 @@ export function App() {
     prepare();
     const refresh = window.setInterval(prepare, 45_000);
     return ()=>{active=false;window.clearInterval(refresh);};
-  },[desktop,detailMode,selectedAsset?.id,exportRefresh]);
+  },[desktop,detailMode,libraryMode,selectedAsset?.id,exportRefresh]);
 
   useEffect(()=>{
     const controller=new AbortController();
@@ -214,7 +215,7 @@ export function App() {
     setMenu(undefined);
     const frame=scopeId?host.navigator.push(object):host.navigator.open(object);
     if(fieldPath)fieldPaths.set(frame.scopeId,fieldPath);
-    if (desktop && !detailMode && !scopeId) void desktop.openDetails({object,...(fieldPath?.[0]==='$library'?{view:'library' as const}:{})}).catch(()=>{
+    if (desktop && !detailMode && !libraryMode && !scopeId) void desktop.openDetails({object}).catch(()=>{
       host.navigator.reset(); setFeedback({text:'详情窗口未能打开',error:true});
     });
   }
@@ -250,30 +251,41 @@ export function App() {
   }
   function viewerMenuAt(x:number,y:number) {
     if(!store.getSnapshot() || !host.navigator.isInteractive(undefined))return;
-    setMenu({x,y,items:[{id:'navigate.library',label:'素材库',onSelect:()=>open(projectRef,undefined,['$library'])}]});
+    setMenu({x,y,items:[{id:'navigate.library',label:'素材库',onSelect:()=>{setMenu(undefined);void windows.openLibrary().catch(()=>setFeedback({text:'素材库窗口未能打开',error:true}));}}]});
   }
   function beginDrag(event:DragEvent,source:DragSource,ticksPerSecond=1000,scopeId?:string) {
     if(!host.navigator.isInteractive(scopeId)){event.preventDefault();return;}
-    const offsetTicks=source.role==='item'?Math.round((event.clientX-event.currentTarget.getBoundingClientRect().left)/PX_PER_SECOND*ticksPerSecond):0;
-    const data={source,offsetTicks};event.dataTransfer.setData(MIME,JSON.stringify(data));event.dataTransfer.effectAllowed='copyMove';setDragging(data);setMenu(undefined);
+    const duration=source.payload.object.kind==='item'?store.getSnapshot()?.document.items[source.payload.object.id]?.durationTicks ?? 0:0;
+    const offsetTicks=source.role==='item'?Math.min(duration,Math.max(0,Math.round((event.clientX-event.currentTarget.getBoundingClientRect().left)/PX_PER_SECOND*ticksPerSecond))):0;
+    const sessionId=windows.beginObjectDrag(source,offsetTicks);
+    if(!sessionId){event.preventDefault();return;}
+    sourceSession.current=sessionId;event.dataTransfer.setData(MIME,sessionId);event.dataTransfer.effectAllowed='copyMove';setMenu(undefined);
   }
-  function dragSource(event:DragEvent):{source:DragSource;offsetTicks:number}|undefined {
-    if(dragging)return dragging;
-    try{return JSON.parse(event.dataTransfer.getData(MIME)) as {source:DragSource;offsetTicks:number};}catch{return undefined;}
+  function endDrag() {
+    const sessionId=sourceSession.current;sourceSession.current=undefined;
+    if(sessionId)windows.endObjectDrag(sessionId);
+  }
+  function dragSource(event:DragEvent,preview=false):DesktopObjectDrag|undefined {
+    // Chromium protects payload reads during hover. A drop can read its token
+    // and must never authorize unrelated data from a previously active drag.
+    const token=event.dataTransfer.getData(MIME)||(preview&&event.dataTransfer.types.includes(MIME)?dragging?.sessionId:undefined);
+    return token?windows.resolveObjectDrag(token):undefined;
   }
   function dropContext(source:DragSource,target:DragTarget,scopeId?:string) {
     const project=store.getSnapshot();return project?{source,target,project,...(scopeId?{scopeId}: {})}:undefined;
   }
   function dragOver(event:DragEvent,target:DragTarget,scopeId?:string) {
-    const source=dragging?.source;if(!source)return;
+    const source=dragSource(event,true)?.source;if(!source)return;
     const ctx=dropContext(source,target,scopeId);if(!ctx)return;
     const availability=host.drag.hover(ctx);
     if(availability.status==='available'){event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=source.role==='item'?'move':'copy';}
     if(target.role==='timeline.position')setDropHint({id:'id' in target.object?target.object.id:'',tick:Number(target.data.startTick),valid:availability.status==='available'});
   }
   function drop(event:DragEvent,target:DragTarget,scopeId?:string) {
-    event.preventDefault();event.stopPropagation();const data=dragSource(event);setDragging(undefined);setDropHint(undefined);
-    if(!data)return;const ctx=dropContext(data.source,target,scopeId);if(!ctx)return;const command=host.drag.drop(ctx);
+    event.preventDefault();event.stopPropagation();const data=dragSource(event);setDropHint(undefined);
+    if(!data)return;const ctx=dropContext(data.source,target,scopeId);if(!ctx || host.drag.hover(ctx).status!=='available')return;
+    const consumed=windows.finishObjectDrag(data.sessionId);if(!consumed)return;
+    const command=host.drag.drop({...ctx,source:consumed.source});
     if(command)void execute(command.type,command.payload as JsonObject,scopeId);
   }
   function targetAt(event:DragEvent,timelineId:string):DragTarget {
@@ -321,76 +333,26 @@ export function App() {
     return Boolean(model && model.maxReferences>0 && (item.referenceAssetIds.length>0 || canReferenceDrop(item.id,scopeId)));
   }
 
-  function library(scope:string) {
+  function library() {
     if(!document)return null;
     const source=dragging?.source;
-    const draggedAsset=source?.role==='asset'?document.assets[source.payload.object.id]:undefined;
-    const outputs=Object.values(document.items).filter(item=>item.outputAssetId && document.assets[item.outputAssetId]);
-    const relationTimelines=draggedAsset?timelines.filter(timeline=>{
-      const model=models.find(candidate=>candidate.modelId===timeline.modelId);
-      if(model?.outputKind===draggedAsset.kind)return true;
-      return timeline.itemIds.some(id=>{
-        const ctx=dropContext(source!,refTarget(id),scope);
-        return ctx&&host.drag.hover(ctx).status==='available';
-      });
-    }):[];
-    return <div className="details-stack" onDragEnd={()=>{setDragging(undefined);setDropHint(undefined);}}>
-      <div className={`context-library ${source?.role==='item'?'context-library--target':''}`} data-testid="asset-library" data-scope-id={scope}
-        onDragOver={event=>{if(event.dataTransfer.types.includes('Files')&&host.navigator.isInteractive(scope)){event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect='copy';}else dragOver(event,{role:'asset-library',object:projectRef,data:{}},scope);}}
-        onDrop={event=>{if(event.dataTransfer.files.length)void importFiles(event,scope);else drop(event,{role:'asset-library',object:projectRef,data:{}},scope);}}>
-        {allAssets.length?<div className="asset-grid">{allAssets.map(asset=>{
-          const object:ObjectRef={kind:'asset',projectId:PROJECT_ID,id:asset.id};
-          return <div key={asset.id} className="asset-card" data-testid="asset-card" data-asset-id={asset.id} tabIndex={0} role="group" draggable aria-label={String(asset.metadata.name ?? '素材')}
-            onDoubleClick={()=>open(object,scope)} onKeyDown={event=>objectKeys(event,object,scope)} onContextMenu={event=>context(event,object,scope)}
-            onDragStart={event=>beginDrag(event,{role:'asset',payload:{object:{kind:'asset',projectId:PROJECT_ID,id:asset.id}}},1000,scope)}>
-            <div className="asset-card__preview"><MediaPreview asset={asset}/></div><p>{String(asset.metadata.name ?? '素材')}</p>
-          </div>;
-        })}</div>:<div className="library-empty"><p className="pixel-description">拖入素材</p></div>}
-      </div>
-      {draggedAsset&&relationTimelines.length>0&&<div className="relation-surface" aria-label="素材关系" data-testid="relation-surface" data-scope-id={scope}>
-        {relationTimelines.map(timeline=>{
-          const model=models.find(candidate=>candidate.modelId===timeline.modelId);const compatible=model?.outputKind===draggedAsset.kind;
-          const timelineRef:ObjectRef={kind:'timeline',projectId:PROJECT_ID,id:timeline.id};
-          return <div key={timeline.id} className="relation-row">
-            <div className="relation-title" tabIndex={0} role="group" onDoubleClick={()=>open(timelineRef,scope)} onKeyDown={event=>objectKeys(event,timelineRef,scope)}>{shortModel(model)}</div>
-            <div className="relation-scroll"><div className={`relation-track ${compatible?'relation-track--target':''}`} style={{width:trackWidth}} data-testid="relation-track" data-timeline-id={timeline.id} data-scope-id={scope} aria-label={`${shortModel(model)} 时间位置`} aria-disabled={!compatible}
-              onDragOver={event=>{event.stopPropagation();if(compatible)dragOver(event,targetAt(event,timeline.id),scope);}}
-              onDrop={event=>{event.preventDefault();event.stopPropagation();if(compatible)drop(event,targetAt(event,timeline.id),scope);}}
-              onDragLeave={()=>setDropHint(undefined)}>
-              <div className="relation-ruler" aria-hidden="true">{Array.from({length:Math.ceil(seconds/4)+1},(_,i)=><span key={i} style={{left:i*4*PX_PER_SECOND}}>{time(i*4)}</span>)}</div>
-              {timeline.itemIds.map(id=>{
-                const item=document.items[id];if(!item)return null;const itemRef:ObjectRef={kind:'item',projectId:PROJECT_ID,id};
-                const acceptsReference=canReferenceDrop(id,scope);
-                return <div key={id} className={`relation-item timeline-item--${model?.outputKind ?? 'video'}`} data-testid="relation-item" data-item-id={id}
-                  style={{left:item.startTick/timeline.ticksPerSecond*PX_PER_SECOND,width:Math.max(48,item.durationTicks/timeline.ticksPerSecond*PX_PER_SECOND)}} tabIndex={0} role="group" aria-label={`片段 ${itemTitle(item)}`}
-                  onDoubleClick={()=>open(itemRef,scope)} onKeyDown={event=>objectKeys(event,itemRef,scope)} onContextMenu={event=>context(event,itemRef,scope)}
-                  onDragOver={event=>{event.stopPropagation();event.dataTransfer.dropEffect='none';}} onDrop={event=>{event.preventDefault();event.stopPropagation();}}>
-                  <span className="relation-item-title">{itemTitle(item)}</span>
-                  {acceptsReference&&<div className="relation-reference" data-testid="relation-reference" data-item-id={id} data-scope-id={scope} aria-label="参考素材"
-                    onDragOver={event=>dragOver(event,refTarget(id),scope)} onDrop={event=>drop(event,refTarget(id),scope)}><PixelIcon name="reference"/><span>{item.referenceAssetIds.length||'参考'}</span></div>}
-                  {!acceptsReference&&item.referenceAssetIds.length>0&&model&&model.maxReferences>0&&<span className="item-caption"><PixelIcon name="reference"/>{item.referenceAssetIds.length}</span>}
-                </div>;
-              })}
-              {dropHint?.id===timeline.id&&<div className={`drop-marker ${!dropHint.valid?'drop-marker--invalid':''}`} style={{left:dropHint.tick/timeline.ticksPerSecond*PX_PER_SECOND}}/>}
-            </div></div>
-          </div>;
-        })}
-      </div>}
-      {!draggedAsset&&outputs.length>0&&<div className="library-outputs"><p className="pixel-description">片段输出</p>{outputs.map(item=>{
-        const object:{kind:'item';projectId:string;id:string}={kind:'item',projectId:PROJECT_ID,id:item.id};const asset=document.assets[item.outputAssetId!]!;
-        return <div key={item.id} className="library-output" data-testid="reusable-item" data-item-id={item.id} tabIndex={0} role="group" draggable
-          onDoubleClick={()=>open(object,scope)} onKeyDown={event=>objectKeys(event,object,scope)} onContextMenu={event=>context(event,object,scope)}
-          onDragStart={event=>beginDrag(event,{role:'item',payload:{object}},document.timelines[item.timelineId]?.ticksPerSecond ?? 1000,scope)}>
-          <div className="library-output-preview"><MediaPreview asset={asset}/></div><span>{itemTitle(item)}</span>
+    return <div className={`context-library ${source?.role==='item'?'context-library--target':''}`} data-testid="asset-library"
+      onDragOver={event=>{if(event.dataTransfer.types.includes('Files')&&host.navigator.isInteractive(undefined)){event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect='copy';}else dragOver(event,{role:'asset-library',object:projectRef,data:{}});}}
+      onDrop={event=>{if(event.dataTransfer.files.length)void importFiles(event);else drop(event,{role:'asset-library',object:projectRef,data:{}});}}>
+      {allAssets.length?<div className="asset-grid">{allAssets.map(asset=>{
+        const object:ObjectRef={kind:'asset',projectId:PROJECT_ID,id:asset.id};
+        return <div key={asset.id} className="asset-card" data-testid="asset-card" data-asset-id={asset.id} tabIndex={0} role="group" draggable aria-label={String(asset.metadata.name ?? '素材')}
+          onDoubleClick={()=>open(object)} onKeyDown={event=>objectKeys(event,object)} onContextMenu={event=>context(event,object)}
+          onDragStart={event=>beginDrag(event,{role:'asset',payload:{object:{kind:'asset',projectId:PROJECT_ID,id:asset.id}}})}>
+          <div className="asset-card__preview"><MediaPreview asset={asset}/></div><p>{String(asset.metadata.name ?? '素材')}</p>
         </div>;
-      })}</div>}
+      })}</div>:<div className="library-empty"><p className="pixel-description">拖入素材</p></div>}
     </div>;
   }
 
   function details() {
     if(!current||!document)return null;
     const object=current.object;const scope=current.scopeId;const nestedPath=fieldPaths.get(scope) ?? [];
-    if(object.kind==='project'&&nestedPath[0]==='$library')return library(scope);
     if(object.kind==='project')return <div className="details-stack">
       <PixelField label="作品名称"><TitleField title={document.title} onCommit={title=>execute('project.title',{title},scope)}/></PixelField>
     </div>;
@@ -453,23 +415,28 @@ export function App() {
   }
   const currentObject=current?.object;
   const currentField=fieldPaths.get(current?.scopeId ?? '')?.at(-1);
-  const modalTitle=currentField==='$library'?'素材库':currentField!==undefined?(typeof currentField==='number'?`音乐段落 ${currentField+1}`:fieldLabel({key:currentField,label:currentField,scope:'itemParams',valueType:'string'})):
+  const modalTitle=currentField!==undefined?(typeof currentField==='number'?`音乐段落 ${currentField+1}`:fieldLabel({key:currentField,label:currentField,scope:'itemParams',valueType:'string'})):
     currentObject?.kind==='project'?'作品详情':currentObject?.kind==='timeline'?'时间线详情':currentObject?.kind==='asset'?'素材详情':'片段详情';
 
-  const modal = <PixelModalHost standalone={detailMode} windowControls={detailMode ? <WindowControls /> : undefined} open={Boolean(current)} title={modalTitle} depth={path.length}
-    description={path.length>1?path.map((frame,index)=>index===path.length-1?modalTitle:fieldPaths.get(frame.scopeId)?.[0]==='$library'?'素材库':frame.object.kind==='item'?'片段':frame.object.kind==='timeline'?'时间线':frame.object.kind==='asset'?'素材':'作品').join(' / '):undefined}
+  const modal = <PixelModalHost standalone={detailMode||libraryMode} windowControls={detailMode||libraryMode ? <WindowControls browserClose={libraryMode?()=>windows.close():undefined} /> : undefined} open={Boolean(current)} title={modalTitle} depth={path.length}
+    description={path.length>1?path.map((frame,index)=>index===path.length-1?modalTitle:frame.object.kind==='item'?'片段':frame.object.kind==='timeline'?'时间线':frame.object.kind==='asset'?'素材':'作品').join(' / '):undefined}
     onBack={()=>{setMenu(undefined);setDragging(undefined);setDropHint(undefined);host.navigator.pop();}}><div data-testid="modal-host">{details()}</div></PixelModalHost>;
-  if (detailMode) return <div className="detail-window" onDragEnd={()=>{setDragging(undefined);setDropHint(undefined);}}>
+  if (detailMode) return <div className="detail-window" onDragEnd={endDrag}>
     {modal}
     {(pending>0||feedback.text)&&<span className={`detail-feedback ${feedback.error?'feedback--error':''}`} role="status" aria-live="polite">{pending?'正在保存…':feedback.text}</span>}
     {menu&&<PixelContextMenu key={menu.items[0]?.id} x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(undefined)}/>}
   </div>;
+  if (libraryMode) return <>
+    <PixelWindowHost kind="library" title={<span className="library-title"><PixelIcon name="folder"/>素材库</span>} controls={<WindowControls browserClose={()=>windows.close()}/>} inert={Boolean(current)} data-testid="library-window" tabIndex={0}
+      onDragEnd={endDrag} onKeyDown={event=>{if(event.key==='Escape'&&!current&&!menu&&!event.defaultPrevented){event.preventDefault();windows.close();}}}>
+      <main className="library-workspace">{library()}</main>
+      {(pending>0||feedback.text)&&<span className={`detail-feedback ${feedback.error?'feedback--error':''}`} role="status" aria-live="polite">{pending?'正在保存…':feedback.text}</span>}
+    </PixelWindowHost>
+    {modal}
+    {menu&&<PixelContextMenu key={menu.items[0]?.id} x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(undefined)}/>}
+  </>;
 
-  return <div className="workbench" onDragEnd={()=>{setDragging(undefined);setDropHint(undefined);}}>
-    <header className="app-header">
-      <div className="project-name" tabIndex={0} role="group" aria-label="作品详情" onDoubleClick={()=>open(projectRef)} onKeyDown={event=>objectKeys(event,projectRef)}><PixelIcon name="folder"/>{document?.title ?? '正在打开作品'}</div>
-      <WindowControls/>
-    </header>
+  return <PixelWindowHost onDragEnd={endDrag} title={<div className="project-name" tabIndex={0} role="group" aria-label="作品详情" onDoubleClick={()=>open(projectRef)} onKeyDown={event=>objectKeys(event,projectRef)}><PixelIcon name="folder"/>{document?.title ?? '正在打开作品'}</div>} controls={<WindowControls/>}>
     <main className="workbench-main">
       
       <div className="upper-workspace">
@@ -529,10 +496,10 @@ export function App() {
     {(pending>0||feedback.text)&&<div className={`workspace-feedback ${feedback.error?'feedback--error':''}`} role="status" aria-live="polite">{pending?'正在保存…':feedback.text}</div>}
     {!desktop&&modal}
     {menu&&<PixelContextMenu key={menu.items[0]?.id} x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(undefined)}/>}
-  </div>;
+  </PixelWindowHost>;
 }
 
-function WindowControls() {
+function WindowControls({browserClose}:{browserClose?:(()=>void)|undefined}={}) {
   const desktop = window.pixelDesktop;
   const [maximized, setMaximized] = useState(false);
   useEffect(()=>{
@@ -540,7 +507,7 @@ function WindowControls() {
     void desktop.isMaximized().then(setMaximized);
     return desktop.onMaximizedChanged(setMaximized);
   },[desktop]);
-  if (!desktop) return null;
+  if (!desktop) return browserClose?<div className="window-controls" data-pixel-window-controls><button type="button" className="window-close" aria-label="关闭窗口" onClick={browserClose}><PixelIcon name="close"/></button></div>:null;
   return <div className="window-controls" aria-label="窗口控制">
     <button type="button" aria-label="最小化" onClick={()=>desktop.minimize()}><svg viewBox="0 0 12 12" shapeRendering="crispEdges"><path d="M2 9h8v1H2z"/></svg></button>
     {!desktop.isDetailWindow&&<button type="button" aria-label={maximized?'还原窗口':'最大化'} onClick={()=>desktop.toggleMaximize()}><svg viewBox="0 0 12 12" shapeRendering="crispEdges"><path d={maximized?'M4 1h7v7H9V3H4zM1 4h7v7H1zm1 2v4h5V6z':'M1 1h10v10H1zm1 2v7h8V3z'}/></svg></button>}
