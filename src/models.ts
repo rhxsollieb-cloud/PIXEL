@@ -160,7 +160,7 @@ const enumField = (scope: 'settings' | 'itemParams', key: string, label: string,
   scope, key, label, valueType: 'enum', options: values.map(value => ({ value, label: value })),
 });
 const supportedActions = [
-  'timeline.create', 'item.create', 'item.move', 'item.resize', 'item.updateParams',
+  'timeline.create', 'item.createDraft', 'item.create', 'item.move', 'item.resize', 'item.updateParams',
   'item.delete', 'generation.submit',
 ] as const;
 

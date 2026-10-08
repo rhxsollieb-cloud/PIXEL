@@ -172,7 +172,7 @@ export class VideoTimelinePlugin extends BaseTimelinePlugin<VideoSettings, Video
     modelIds: ['example.video'],
     itemKind: 'video.clip',
     overlapPolicy: 'reject',
-    supportedActions: ['timeline.create', 'item.create', 'item.move', 'item.resize', 'item.updateParams', 'item.delete', 'generation.submit'],
+    supportedActions: ['timeline.create', 'item.createDraft', 'item.create', 'item.move', 'item.resize', 'item.updateParams', 'item.delete', 'generation.submit'],
     fields: [
       { scope: 'settings', key: 'width', label: 'Width', valueType: 'number' },
       { scope: 'settings', key: 'height', label: 'Height', valueType: 'number' },

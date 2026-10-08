@@ -422,6 +422,8 @@ export interface ContextActionContext {
   target: DeepReadonly<ObjectRef>;
   project: DeepReadonly<ProjectSnapshot>;
   scopeId?: string;
+  /** 当前命中区域的纯语义数据，例如 Timeline 的整数时间位置；不传 DOM 或像素坐标。 */
+  data?: JsonObject;
 }
 export interface ContextActionDefinition {
   id: string;

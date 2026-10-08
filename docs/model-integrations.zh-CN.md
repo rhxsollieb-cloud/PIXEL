@@ -2,7 +2,7 @@
 
 更新日期：2026-10-08。产品与交互规则沿用[设计哲学](design-philosophy.zh-CN.md)；项目、Action 与任务的完整边界见[核心架构](core-architecture.zh-CN.md)。
 
-这次接入实现后端的官方 SDK 适配器、共享模型语义目录、文件任务 ledger、媒体产物存储和诊断 CLI。验证使用真实 SDK 配合模拟 HTTP 响应，未发起付费生成请求。Electron / React 页面、`generation.submit` 的项目事务与 outbox、`generation.applyResult` 的项目挂载仍待实现；生成文件成功不代表项目已自动关联输出。
+当前已实现后端的官方 SDK 适配器、共享模型语义目录、文件任务 ledger、媒体产物存储和诊断 CLI；Electron / React 工作台及 `generation.submit` 的项目事务/outbox、内部 `generation.applyResult` 的受控挂载也已由 `src/workbench.ts` 组合完成。验证使用真实 SDK 配合模拟 HTTP 响应，未发起付费生成请求。正式项目 CLI / Agent 和共享 Action 能力查询仍待接线；诊断 CLI 生成文件成功不代表 GUI 项目已关联输出。
 
 ## 1. 模型、标识与输出
 
@@ -23,6 +23,8 @@ Wan 与 Grok 使用用户指定的版本，不在失败时自动换成相邻模�
 [models.ts](../src/models.ts) 的 `modelRegistry` 提供 `resolve()`、`describe()`、`query()`、`prepareRequest()` 与 `createPlugin()`。描述包括模型版本、输出种类、字段声明、settings / 草稿 params / 可执行 params 的 JSON Schema，以及引用种类与数量边界。查询默认 5 项、最多 20 项，支持 cursor、过滤与 exclude。GUI、CLI、Agent 可以消费同一份目录；基于对象、权限的 `CapabilityCatalog` 查询服务仍待接线。
 
 `ModelTimelinePlugin` 复用 `BaseTimelinePlugin`，各模型拥有自己的 Item kind 与字段。草稿可以先保留空文本，生成前必须通过可执行 schema。未知字段、错误单位、互斥参数和不支持的引用都会在调用 SDK 之前被拒绝。schema 的默认值在后端一次规范化，保存到请求快照，执行中不再读取对象的新参数。
+
+生产初始项目不预置模型、Item 或示例提示词。Timeline 工作区空白处右键 → 新建时间线 → 选择模型仅创建空 Timeline。已有 Timeline 时间位置右键 → 新建生成草稿，经 `item.createDraft` 显式创建无输出的 Item；Asset → Timeline 时间位置则经带 `assetId` 的 `item.create` 放置已有素材。参数字段随后通过对象详情披露。模型 schema 默认值是已明确创建对象的规范化，不是自动向项目填入示例内容；创建模型本身不会附送草稿。
 
 | 模型 | `params` 中的主要字段 | `settings` | 生成时长含义 |
 | --- | --- | --- | --- |
@@ -48,13 +50,15 @@ Wan 公开 480p / 720p / 1080p，支持当前目录声明的五种宽高比；Gr
 
 当前三个 ElevenLabs 端点不接收 Asset 引用；Wan 与 Grok 只接收图片。Grok 最多三张参考图。Wan 的普通参考模式采用宿主上限三张，该上限在 descriptor 中明确标为 `host`；首帧模式必须恰好一张图，当前不支持末帧。不会因接口宽泛就静默忽略输入类型或角色。[Grok 模型引用限制](https://openrouter.ai/x-ai/grok-imagine-image-2.0)、[OpenRouter 视频引用协议](https://openrouter.ai/docs/guides/overview/multimodal/video-generation)。
 
+GUI 不为三个音频模型显示不适用的引用管理。支持引用的 Item 只在已有关系或合法素材拖拽上下文中显示引用区域；hover/drop 会检查类型、重复关系与当前模式上限，Wan 首帧模式在第二张图片提交前即拒绝。后端在 Action 执行与生成请求规范化时继续校验，前端提示不替代最终业务检查。
+
 `BaseModelProvider.generate()` 是公共执行模板：严格解析请求、调用统一模型规范化、检查 provider / 适配器版本、设置覆盖请求及流读取的总超时、转发取消、校验产物的 job / attempt 归属，并脱敏供应商错误。扩展点是受保护的 `performGeneration()`。SDK 的生成请求禁用自动重试，避免一次本地失败悄悄产生第二次生成。
 
 ElevenLabs 的网络 fetch 拒绝会触发当前 SDK 的计时器清理缺口；核心 `createSdkFetch()` 将该本地失败转换成无响应内容的错误状态，继续由 SDK 正常处理，再由公共模板返回脱敏错误。模拟 HTTP 测试覆盖该兼容问题、流在收到 headers 后仍挂起的超时，以及取消后的流释放；无需替换供应商 SDK 或改变生成语义。
 
 Wan 使用异步视频 API：先提交，再将供应商任务 ID 通过 `checkpointProviderTask()` 持久化，随后轮询，最后使用固定的 SDK content 端点下载产物。恢复时传入已保存的 `providerTaskId`，只继续查询及下载，不重复 POST。适配器不会直接访问 OpenRouter 响应中的任意 polling / unsigned URL。[OpenRouter 异步视频 API](https://openrouter.ai/docs/api/api-reference/video-generation/create-videos)。
 
-[runtime.ts](../src/runtime.ts) 的 `GenerationRunner` 实现后端的 `run()` / `resume()`；[storage.ts](../src/storage.ts) 的 `FileJobRepository` 与 `FileArtifactStore` 保存请求快照、状态、远端任务 ID 和真实媒体文件。文件 ledger 面向单后端进程，用 attempt / state guard 串行更新；它不提供项目与 outbox 的联合事务，也不承担多进程数据库锁。
+[runtime.ts](../src/runtime.ts) 的 `GenerationRunner` 实现后端的 `run()` / `resume()`；[storage.ts](../src/storage.ts) 的 `FileJobRepository` 与 `FileArtifactStore` 保存请求快照、状态、远端任务 ID 和真实媒体文件。文件 ledger 面向单后端进程，用 attempt / state guard 串行更新；它自身不提供项目与 outbox 的联合事务，也不承担多进程数据库锁。工作台的 `FileWorkbenchRepository` 已原子提交项目 token 与 outbox，随后由宿主消费任务 ledger，并通过内部 Action 检查请求归属后挂载产物。
 
 中断任务恢复到 queued 时，`transitionJob()` 递增 attempt、清除旧运行结果并保留已持久化的远端任务 ID。已有 `providerTaskId` 且供应商支持恢复时，`TIMEOUT`、`UPSTREAM`、`RATE_LIMITED` 或 `AUTHENTICATION` 错误归为 `interrupted`，保留原任务等待显式恢复；不自动重试，也不发起新的生成 POST。没有远端 ID 的任务不会盲目恢复并再次提交。供应商已确认失败 / 取消 / 过期时返回 `REMOTE_FAILED` 并进入 `failed` 终态，不会当作可恢复中断。Grok 与 ElevenLabs 本次没有可恢复的远端任务协议。两家 provider 的本地取消均不声称供应商已经停止计费。
 
@@ -92,12 +96,12 @@ npm run generate -- --resume JOB_ID
 
 图片参考可重复传入 `--reference-file image.png`；诊断工具先将 PNG / JPEG / WebP 导入受控产物存储，再捕获引用，单图最多 25 MiB。Wan 首帧模式在参数文件中设置 `"referenceMode":"firstFrame"` 并传入恰好一张图片。`--storage-dir path` 可指定诊断存储目录；恢复必须使用原任务所在目录，且不能同时替换参数、设置或引用。
 
-该 CLI 是后端接入诊断工具，直接运行捕获的 `GenerationRequest`，使用同一模型校验与执行内核。正式 GUI / CLI / Agent 项目编辑入口仍需通过 `ActionExecutor` 实现 `generation.submit`、原子 outbox 和结果挂载，不能把诊断执行成功宣称为该项目工作流已完成。
+该 CLI 是后端接入诊断工具，使用 `projectId: 'backend-example'` 与 `targetItemId: 'example-item'` 捕获 `GenerationRequest`，直接调用 `run()` / `resume()`，复用模型校验与执行内核。它不是当前 GUI 项目的 `ActionEnvelope` 入口，不将生成产物自动挂载到该项目。GUI 的 `generation.submit`、原子 outbox 和内部结果挂载已通过 `Workbench` / `ActionExecutor` 实现；正式项目 CLI / Agent 适配器仍待接线，届时必须调用同一 Action 协议，不能把诊断执行成功宣称为这些入口已经完成。
 
 ## 5. 设计哲学评审与当前证据
 
-对应设计哲学第 10 节，本次作用于模型参数、Item 生成请求、任务与产物；标准 GUI 路径仍为 Timeline 空白处右键选模型创建、Item 双击编辑、Item 右键生成，未增加模型拖拽、常驻按钮或插件 Modal。新增字段仅扩展语义，由宿主决定控件和详情导航。
+对应设计哲学第 10 节，模型能力作用于参数、Item 生成请求、任务与产物；标准 GUI 路径为 Timeline 工作区空白处右键 → 新建时间线 → 选择模型、已有 Timeline 时间位置右键 → 新建生成草稿、Item 双击编辑、Item 右键生成。已有素材另由 Asset → Timeline 放置。默认只显示 Viewer + Timeline；素材库从作品标题 → 作品详情 → 素材库进入，关系目标在同一顶部详情作用域临时显示，背景保持隔离。新增字段仅扩展语义，由宿主决定控件和导航，不增加模型拖拽、常驻按钮或插件 Modal。本轮理解与偏移修正见[哲学对齐记录](philosophy-alignment.zh-CN.md)。
 
-`ModelRegistry` 与 `BaseModelProvider` 集中校验，不在 GUI / CLI / Agent 各自复制供应商规则。项目权威状态边界不变，任务 ledger 与产物存储独立于编辑历史；没有实现挂载 Action 前，runner 不写项目。attempt、保存远端 ID 与总超时保护中断执行；项目层的旧结果守卫仍需在 `generation.applyResult` 的事务里最终检查。本次是现有哲学的实现补全，不改变产品基线。
+`ModelRegistry` 与 `BaseModelProvider` 集中校验，正式项目 CLI / Agent 接线时也应复用，避免各自复制供应商规则。项目权威状态边界不变，任务 ledger 与产物存储独立于编辑历史，runner 不直接写项目。attempt、保存远端 ID 与总超时保护中断执行；工作台已在 `generation.applyResult` 事务内执行旧结果、请求输入及产物归属检查。像素界面修正保持共享 Action 和宿主交互边界；当前基线及调整依据以设计哲学 1.1 为准。
 
 相关自动验证覆盖 schema 默认值与未知字段、模型别名、图像 / 音频 / 视频参数隔离、真实 SDK 编码、禁用自动重试、checkpoint 顺序与远端恢复、引用限制、取消、超时、异常产物和脱敏错误。测试使用模拟响应，不能证明账户权限、余额或供应商实际生成质量；付费端到端验证按明确请求另行执行。

@@ -7,3 +7,5 @@ dist/
 .pixel/
 playwright-report/
 test-results/
+electron/backend.mjs
+release/

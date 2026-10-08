@@ -14,8 +14,14 @@ export function createInteractionHost(projectId: string, getModels: () => readon
   const jobFor = (itemId: string) => getJobs().filter(job => job.request.targetItemId === itemId).sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0];
   const busy = (itemId: string) => ['queued','running','cancelRequested'].includes(jobFor(itemId)?.state ?? '');
   const parentItem = () => [...navigator.getPath()].reverse().find(frame => frame.object.kind === 'item')?.object;
+  const positionTick = (context: ContextActionContext): number | undefined => {
+    if (context.target.kind !== 'timeline' || context.data?.role !== 'timeline.position') return undefined;
+    const tick = context.data.startTick;
+    return typeof tick === 'number' && Number.isSafeInteger(tick) && tick >= 0 ? tick : undefined;
+  };
   const definitions = [
     { id: 'timeline.create', title: '新建模型时间线', kinds: ['project'] as const, payload: () => ({}) },
+    { id: 'item.createDraft', title: '新建生成草稿', kinds: ['timeline'] as const, payload: (c: ContextActionContext) => ({ timelineId: 'id' in c.target ? c.target.id : '', startTick: positionTick(c)! }) },
     { id: 'timeline.delete', title: '删除时间线', kinds: ['timeline'] as const, payload: (c: ContextActionContext) => ({ timelineId: 'id' in c.target ? c.target.id : '' }) },
     { id: 'generation.submit', title: '生成片段', kinds: ['item'] as const, payload: (c: ContextActionContext) => ({ itemId: 'id' in c.target ? c.target.id : '' }) },
     { id: 'generation.cancel', title: '取消当前生成', kinds: ['item'] as const, payload: (c: ContextActionContext) => ({ jobId: jobFor('id' in c.target ? c.target.id : '')?.id ?? '' }) },
@@ -29,6 +35,10 @@ export function createInteractionHost(projectId: string, getModels: () => readon
     id: definition.id, title: definition.title, actionType: definition.id, targetKinds: definition.kinds,
     availability(context) {
       const id = 'id' in context.target ? context.target.id : '';
+      if (definition.id === 'item.createDraft') {
+        const model = getModels().find(candidate => candidate.modelId === context.project.document.timelines[id]?.modelId);
+        return positionTick(context) !== undefined && model ? { status: 'available' } : { status: 'hidden' };
+      }
       if (definition.id === 'generation.cancel') return busy(id) ? { status: 'available' } : { status: 'hidden' };
       if (definition.id === 'generation.resume') return jobFor(id)?.state === 'interrupted' ? { status: 'available' } : { status: 'hidden' };
       if (definition.id === 'generation.submit' && busy(id)) return { status: 'disabled', reason: '当前片段正在生成' };
@@ -60,9 +70,10 @@ export function createInteractionHost(projectId: string, getModels: () => readon
     preview: ({source,target,project}) => {
       const itemId = 'id' in target.object ? target.object.id : '';
       const item = project.document.items[itemId]; const asset = project.document.assets[source.payload.object.id]; const model=modelFor(project,itemId);
-      if (!model || !asset || !model.referenceKinds.includes(asset.kind)) return {status:'disabled',reason:'该模型不支持这种参考素材'};
+      if (!model || !asset || model.maxReferences < 1 || !model.referenceKinds.includes(asset.kind)) return {status:'disabled',reason:'该模型不支持这种参考素材'};
       if (item?.referenceAssetIds.includes(asset.id)) return {status:'disabled',reason:'素材已被引用'};
-      if ((item?.referenceAssetIds.length ?? 0) >= model.maxReferences) return {status:'disabled',reason:'参考素材数量已达上限'};
+      const maximum = model.modelId === 'alibaba/wan-3.0' && item?.params.referenceMode === 'firstFrame' ? Math.min(1, model.maxReferences) : model.maxReferences;
+      if ((item?.referenceAssetIds.length ?? 0) >= maximum) return {status:'disabled',reason:'参考素材数量已达上限'};
       return {status:'available'};
     },
     buildPayload: ({source,target}) => ({assetId:source.payload.object.id,itemId:'id' in target.object ? target.object.id:''}),

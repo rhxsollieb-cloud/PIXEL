@@ -1,13 +1,54 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DomainError } from './backend.js';
 import { createWorkbench, type Workbench, type WorkbenchOptions } from './workbench.js';
-import { createModelBackend, loadBackendConfiguration } from './runtime.js';
+import { loadBackendConfiguration } from './backend-configuration.js';
 
-interface ApiOptions { frontendPort?: number; apiPort?: number }
+export interface ApiOptions {
+  frontendPort?: number;
+  apiPort?: number;
+  /** Desktop hosts serve their compiled renderer from this directory. */
+  frontendDirectory?: string;
+  /** Trusted desktop host installs this opaque value as an HttpOnly session cookie. */
+  sessionToken?: string;
+}
+const desktopCookie = 'pixel_desktop_session';
+const staticTypes: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.webp': 'image/webp', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon',
+};
+function hasDesktopSession(request: IncomingMessage, token: string | undefined): boolean {
+  if (!token) return true;
+  return (request.headers.cookie ?? '').split(';').some(cookie => cookie.trim() === `${desktopCookie}=${token}`);
+}
+async function serveFrontend(request: IncomingMessage, response: ServerResponse, pathname: string, directory: string): Promise<boolean> {
+  const root = await realpath(resolve(directory));
+  let decoded: string;
+  try { decoded = decodeURIComponent(pathname); } catch { return false; }
+  if (decoded.includes('\0') || decoded.includes('\\')) return false;
+  const candidate = resolve(root, decoded === '/' ? 'index.html' : `.${decoded}`);
+  const withinRoot = (path: string) => { const local = relative(root, path); return !isAbsolute(local) && local !== '..' && !local.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`); };
+  if (!withinRoot(candidate)) return false;
+  let path: string;
+  try { path = await realpath(candidate); if (!withinRoot(path) || !(await stat(path)).isFile()) return false; }
+  catch { return false; }
+  const contentType = staticTypes[extname(path)];
+  if (!contentType) return false;
+  response.writeHead(200, {
+    'Content-Type': contentType, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-cache',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  });
+  if (request.method === 'HEAD') { response.end(); return true; }
+  const stream = createReadStream(path);
+  response.on('close', () => stream.destroy());
+  stream.on('error', () => response.destroy());
+  stream.pipe(response);
+  return true;
+}
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   response.end(JSON.stringify(value));
@@ -57,7 +98,11 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
       const address = server.address();
       const apiPort = typeof address === 'object' && address ? address.port : options.apiPort ?? 4311;
       if (!trustedOrigin(request, apiPort, frontendPort)) { json(response, 403, { ok: false, error: { code: 'FORBIDDEN', message: '请求来源不在本地工作台范围内' } }); return; }
+      if (!hasDesktopSession(request, options.sessionToken)) { json(response, 403, { ok: false, error: { code: 'FORBIDDEN', message: '桌面会话无效' } }); return; }
       const url = new URL(request.url ?? '/', `http://127.0.0.1:${apiPort}`);
+      if (options.frontendDirectory && (request.method === 'GET' || request.method === 'HEAD') && !url.pathname.startsWith('/api/')) {
+        if (await serveFrontend(request, response, url.pathname, options.frontendDirectory)) return;
+      }
       if (request.method === 'GET' && url.pathname === '/api/project') { json(response, 200, await workbench.snapshot()); return; }
       if (request.method === 'GET' && url.pathname === '/api/models') {
         const query = url.searchParams;
@@ -135,13 +180,14 @@ function port(value: string | undefined, fallback: number): number {
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) throw new DomainError('INVALID_INPUT', '本地服务端口无效');
   return parsed;
 }
-export async function startWorkbenchServer(options: WorkbenchOptions & { apiPort?: number; frontendPort?: number } = {}): Promise<{ server: Server; workbench: Workbench }> {
+export async function startWorkbenchServer(options: WorkbenchOptions & ApiOptions & { envPath?: string } = {}): Promise<{ server: Server; workbench: Workbench }> {
   const directory = resolve(options.directory ?? process.env.PIXEL_STORAGE_DIR ?? '.pixel');
   let runner = options.runner;
   let providers = options.providers;
   if (!runner && !providers) {
     try {
-      const configuration = await loadBackendConfiguration({ storageDirectory: directory });
+      const configuration = await loadBackendConfiguration({ storageDirectory: directory, ...(options.envPath ? { envPath: options.envPath } : {}) });
+      const { createModelBackend } = await import('./runtime.js');
       runner = createModelBackend(configuration);
       providers = { elevenlabs: true, openrouter: true };
     } catch { providers = { elevenlabs: false, openrouter: false }; }
@@ -149,7 +195,7 @@ export async function startWorkbenchServer(options: WorkbenchOptions & { apiPort
   const workbench = await createWorkbench({ ...options, directory, ...(runner ? { runner } : {}), ...(providers ? { providers } : {}) });
   const apiPort = options.apiPort ?? port(process.env.PIXEL_API_PORT, 4311);
   const frontendPort = options.frontendPort ?? port(process.env.PIXEL_PORT, 4310);
-  const server = createApiServer(workbench, { apiPort, frontendPort });
+  const server = createApiServer(workbench, { ...options, apiPort, frontendPort });
   await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(apiPort, '127.0.0.1', () => { server.off('error', reject); accept(); }); });
   return { server, workbench };
 }

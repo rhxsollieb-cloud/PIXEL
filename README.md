@@ -1,8 +1,15 @@
-# Pixel 核心设计骨架
+# Pixel
 
-从《生成视频软件理解》的产品约束出发，设计前后端共用的动作协议、插件语义和生成任务边界。
+本地运行的像素风生成创作工作台。默认界面只有 Viewer 与 Timeline；双击进入对象、右键执行命令、拖拽建立关系。素材库从作品标题 → 作品详情 → 素材库逐层进入，桌面版使用独立原生详情窗口，界面与后端共用动作协议。
 
-先看 [设计哲学与架构约束](docs/design-philosophy.zh-CN.md)，理解产品基线；再看 [核心架构设计](docs/core-architecture.zh-CN.md) 与代码。五个指定模型的配置、参数及执行边界见[模型接入文档](docs/model-integrations.zh-CN.md)。后续开发遵循 [仓库开发指引](AGENTS.md)，核心变更按设计哲学记录相关取舍。
+```sh
+npm install
+npm run desktop
+```
+
+Windows 可执行文件通过 `npm run package:win` 构建，输出在 `release/`。桌面运行、存储位置、像素视觉及验证说明见 [本地桌面与像素界面](docs/desktop-ui.zh-CN.md)。浏览器开发使用 `npm run dev`。
+
+先看 [设计哲学与架构约束](docs/design-philosophy.zh-CN.md)，理解产品基线；本轮理解与偏移修正见[哲学对齐记录](docs/philosophy-alignment.zh-CN.md)。再看 [核心架构设计](docs/core-architecture.zh-CN.md) 与代码。五个指定模型的配置、参数及执行边界见[模型接入文档](docs/model-integrations.zh-CN.md)。后续开发遵循 [仓库开发指引](AGENTS.md)，核心变更按设计哲学记录相关取舍。
 
 | 文件 | 内容 |
 | --- | --- |
@@ -17,6 +24,8 @@
 | [examples/move-clip.ts](examples/move-clip.ts) | 三种入口共用协议、重复提交只执行一次的示例 |
 | [examples/generate-media.ts](examples/generate-media.ts) | 模型查询与真实 SDK 的后端诊断 CLI |
 
+目标架构如下；当前 GUI 已接入 Action System，正式项目 CLI / Agent 适配器仍待接线。
+
 ```text
 GUI / CLI / Agent
        ↓ 同一个 ActionEnvelope
@@ -25,7 +34,7 @@ GUI / CLI / Agent
 前端交互控制器 ← 后端快照及变更通知
 ```
 
-原则：领域数据用接口，行为扩展点用基类，React 视图用函数组件。后端是项目状态的权威来源；插件声明字段与语义，由宿主统一交互。右键创建模型时间线，双击进入详情，拖拽的每条对象关系只有一个明确动作。
+原则：领域数据用接口，行为扩展点用基类，React 视图用函数组件。后端是项目状态的权威来源；插件声明字段与语义，由宿主统一交互。新项目为空，Timeline 工作区空白处右键 → 新建时间线 → 选择模型只创建空 Timeline。在已有 Timeline 的时间位置右键 → 新建生成草稿，再双击填写参数、右键生成；Asset → Timeline 时间位置则放置已有素材。库内的关系目标在当前顶部详情作用域出现，背景保持隔离。像素用于规范字体、栅格、状态和边界，空作品不预置示例画面、假波形或常驻教程。
 
 安装与验证：
 
@@ -36,6 +45,6 @@ npm test
 npm run example
 ```
 
-`npm run models` 查询共享模型目录。后端从 `.env` 读取 `ELEVENLABS_API_KEY` 与 `OPENROUTER_API_KEY`；密钥不进入前端或项目。`npm run generate -- --model MODEL_ID --params-file params.json` 会调用真实模型并保存产物，可能产生费用。Eleven v4 参数必须提供可用 `voiceId`；Wan / Grok 的设置可用 `--settings-file settings.json` 传入。视频中断恢复使用 `npm run generate -- --resume JOB_ID`，详见模型接入文档。
+`npm run models` 查询共享模型目录。后端从 `.env` 读取 `ELEVENLABS_API_KEY` 与 `OPENROUTER_API_KEY`；密钥不进入前端或项目。`npm run generate -- --model MODEL_ID --params-file params.json` 是后端诊断 CLI，会调用真实模型并保存产物，可能产生费用。它使用 `backend-example` 请求，直接调用生成执行内核，不是当前 GUI 项目的 Action 入口，也不将产物自动挂载到该项目。Eleven v4 参数必须提供可用 `voiceId`；Wan / Grok 的设置可用 `--settings-file settings.json` 传入。视频中断恢复使用 `npm run generate -- --resume JOB_ID`，详见模型接入文档。
 
-当前已有内存动作闭环、官方 SDK 模型适配器、后端生成诊断及单进程文件任务/产物存储；SDK 验证使用模拟 HTTP，尚未做付费生成测试。Electron / React 页面、项目持久化、完整撤销重做、`generation.submit` / outbox / `generation.applyResult`、自动调度和原生文件导出仍按架构文档继续实现。
+当前已具备 Electron 桌面宿主、React 工作台、文件项目持久化、五模型字段、生成提交 / outbox / 受控结果挂载、单进程任务和媒体存储，以及 Viewer 当前媒体的原生文件拖出。SDK 验证使用模拟 HTTP，未做付费生成测试。正式项目 CLI / Agent、共享 Action 能力查询、完整撤销重做、跨窗口对象拖拽、项目文件打开及时间线合成导出仍按架构文档继续实现。已有持久化项目不会因本轮界面修正被清理。

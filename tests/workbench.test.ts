@@ -12,6 +12,7 @@ import { GenerationRunner, ProviderRegistry } from '../src/runtime.js';
 import { FileArtifactStore, FileJobRepository } from '../src/storage.js';
 import { createWorkbench, createInitialWorkbenchProject, WORKBENCH_PROJECT_ID, type Workbench } from '../src/workbench.js';
 import { createApiServer } from '../src/server.js';
+import { createWorkbenchFixture } from './workbench-fixtures.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhUYAAAAASUVORK5CYII=', 'base64');
 async function directory(context: TestContext): Promise<string> {
@@ -52,30 +53,33 @@ function runner(root: string, provider: MockImageProvider): GenerationRunner {
 }
 function imageItem(workbenchSnapshot: Awaited<ReturnType<Workbench['snapshot']>>) { return Object.values(workbenchSnapshot.document.items).find(item => item.kind === 'image.generated')!; }
 
-test('bootstrap contains three explicit drafts and no fictional media or tasks; all five models expose serializable defaults', async context => {
+test('bootstrap contains no unsolicited timelines, items, assets or tasks; model defaults remain discoverable', async context => {
   const root = await directory(context);
   const workbench = await createWorkbench({ directory: root }); context.after(() => workbench.close());
   const snapshot = await workbench.snapshot();
-  assert.equal(Object.keys(snapshot.document.timelines).length, 3);
-  assert.equal(Object.keys(snapshot.document.items).length, 3);
+  assert.deepEqual(snapshot, createInitialWorkbenchProject());
+  assert.deepEqual(snapshot.document.timelines, {});
+  assert.deepEqual(snapshot.document.items, {});
   assert.deepEqual(snapshot.document.assets, {});
-  assert.ok(Object.values(snapshot.document.items).every(item => item.outputAssetId === undefined));
   assert.deepEqual(await workbench.jobs(), { items: [] });
+  const reopened = await createWorkbench({ directory: root }); context.after(() => reopened.close());
+  assert.deepEqual(await reopened.snapshot(), snapshot);
   const declarations = workbench.models();
   assert.equal(declarations.items.length, 5);
   assert.ok(declarations.items.every(model => model.paramsDefaults && model.settingsDefaults));
   assert.doesNotThrow(() => JSON.stringify(declarations));
 });
 
-test('timeline creation initializes one editable draft and persisted idempotency never duplicates objects', async context => {
+test('timeline creation is empty and persisted idempotency never duplicates objects', async context => {
   const root = await directory(context);
   const workbench = await createWorkbench({ directory: root }); context.after(() => workbench.close());
   const input = await envelope(workbench, 'timeline.create', { modelId: 'eleven_v4' });
   const first = success(await workbench.execute(input));
   const timelineId = String(first.outcome.timelineId);
   const created = (await workbench.snapshot()).document.timelines[timelineId]!;
-  assert.equal(created.itemIds.length, 1);
-  assert.equal((await workbench.snapshot()).document.items[created.itemIds[0]!]!.params.voiceId, '');
+  assert.deepEqual(created.itemIds, []);
+  assert.deepEqual((await workbench.snapshot()).document.items, {});
+  assert.deepEqual(first.outcome, { timelineId });
   const reopened = await createWorkbench({ directory: root }); context.after(() => reopened.close());
   assert.deepEqual(await reopened.execute(input), first);
   assert.equal((await reopened.snapshot()).revision, 1);
@@ -83,8 +87,59 @@ test('timeline creation initializes one editable draft and persisted idempotency
   assert.equal(reused.ok, false); if (!reused.ok) assert.equal(reused.error.code, 'REQUEST_ID_REUSED');
 });
 
+test('opening persisted projects preserves existing content rather than removing previous example data', async context => {
+  const root = await directory(context);
+  const initial = createWorkbenchFixture();
+  initial.document.title = '已保存的作品';
+  const workbench = await createWorkbench({ directory: root, initial }); context.after(() => workbench.close());
+  const item = imageItem(await workbench.snapshot());
+  success(await action(workbench, 'item.params', { itemId: item.id, params: { prompt: '用户保存的提示词' } }));
+  const saved = await workbench.snapshot();
+  const reopened = await createWorkbench({ directory: root }); context.after(() => reopened.close());
+  assert.deepEqual(await reopened.snapshot(), saved);
+});
+
+test('draft creation is explicit, idempotent and distinct from asset placement; invalid drafts never commit', async context => {
+  const root = await directory(context);
+  const workbench = await createWorkbench({ directory: root }); context.after(() => workbench.close());
+  const timeline = success(await action(workbench, 'timeline.create', { modelId: 'eleven_v4' }));
+  const timelineId = String(timeline.outcome.timelineId);
+  assert.deepEqual((await workbench.snapshot()).document.items, {});
+  const input = await envelope(workbench, 'item.createDraft', { timelineId, startTick: 0 });
+  const created = success(await workbench.execute(input));
+  const snapshot = await workbench.snapshot();
+  const item = snapshot.document.items[String(created.outcome.itemId)]!;
+  assert.deepEqual(snapshot.document.timelines[timelineId]!.itemIds, [item.id]);
+  assert.equal(item.params.voiceId, '');
+  assert.equal(item.outputAssetId, undefined);
+  assert.deepEqual(item.referenceAssetIds, []);
+  assert.deepEqual(snapshot.document.assets, {});
+  assert.deepEqual(await workbench.jobs(), { items: [] });
+  assert.deepEqual(await workbench.execute(input), created);
+  const reopened = await createWorkbench({ directory: root }); context.after(() => reopened.close());
+  assert.deepEqual(await reopened.execute(input), created);
+  assert.deepEqual(await reopened.snapshot(), snapshot);
+
+  const invalidDrafts = [
+    { payload: { timelineId, startTick: 6000, assetId: randomUUID() }, code: 'INVALID_INPUT' },
+    { payload: { timelineId, startTick: 6000, durationTicks: 2000 }, code: 'INVALID_INPUT' },
+    { payload: { timelineId: 'unknown-timeline', startTick: 6000 }, code: 'NOT_FOUND' },
+    { payload: { timelineId, startTick: 0 }, code: 'NOT_APPLICABLE' },
+  ];
+  for (const invalid of invalidDrafts) {
+    const rejected = await action(reopened, 'item.createDraft', invalid.payload);
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok) assert.equal(rejected.error.code, invalid.code);
+    assert.deepEqual(await reopened.snapshot(), snapshot);
+  }
+  const missingAsset = await action(reopened, 'item.create', { timelineId, startTick: 6000 });
+  assert.equal(missingAsset.ok, false);
+  if (!missingAsset.ok) assert.equal(missingAsset.error.code, 'INVALID_INPUT');
+  assert.deepEqual(await reopened.snapshot(), snapshot);
+});
+
 test('move and resize enforce half-open non-overlap and preserve input tokens; invalid updates never commit', async context => {
-  const workbench = await createWorkbench({ directory: await directory(context) }); context.after(() => workbench.close());
+  const workbench = await createWorkbench({ directory: await directory(context), initial: createWorkbenchFixture() }); context.after(() => workbench.close());
   const original = imageItem(await workbench.snapshot());
   const duplicate = success(await action(workbench, 'item.duplicate', { itemId: original.id }));
   const copyId = String(duplicate.outcome.itemId);
@@ -98,7 +153,7 @@ test('move and resize enforce half-open non-overlap and preserve input tokens; i
 });
 
 test('input edits invalidate only relevant item tokens; project title and placement leave requests valid', async context => {
-  const workbench = await createWorkbench({ directory: await directory(context) }); context.after(() => workbench.close());
+  const workbench = await createWorkbench({ directory: await directory(context), initial: createWorkbenchFixture() }); context.after(() => workbench.close());
   const snapshot = await workbench.snapshot();
   const item = imageItem(snapshot);
   success(await action(workbench, 'item.params', { itemId: item.id, params: { prompt: '新的像素山谷' } }));
@@ -115,7 +170,7 @@ test('input edits invalidate only relevant item tokens; project title and placem
 
 test('verified import replays by bytes across restart; source placement and reference are distinct validated semantics', async context => {
   const root = await directory(context);
-  const workbench = await createWorkbench({ directory: root }); context.after(() => workbench.close());
+  const workbench = await createWorkbench({ directory: root, initial: createWorkbenchFixture() }); context.after(() => workbench.close());
   const input = { bytes: png, mimeType: 'image/png', name: '山谷.png', requestId: randomUUID(), expectedRevision: 0 };
   const imported = success(await workbench.importMedia(input));
   const assetId = String(imported.outcome.assetId);
@@ -139,7 +194,7 @@ test('verified import replays by bytes across restart; source placement and refe
 });
 
 test('renderer cannot import arbitrary file handles or apply generation results, and malformed media is rejected', async context => {
-  const workbench = await createWorkbench({ directory: await directory(context) }); context.after(() => workbench.close());
+  const workbench = await createWorkbench({ directory: await directory(context), initial: createWorkbenchFixture() }); context.after(() => workbench.close());
   const asset = { id: randomUUID(), kind: 'image', fileRef: 'C:/private/.env', metadata: {} };
   const forged = await action(workbench, 'asset.import', { asset });
   assert.equal(forged.ok, false); if (!forged.ok) assert.equal(forged.error.code, 'FORBIDDEN');
@@ -151,7 +206,7 @@ test('renderer cannot import arbitrary file handles or apply generation results,
 
 test('generation commits a durable outbox before dispatch, saves real bytes, and applies only through internal Action', async context => {
   const root = await directory(context); const provider = new MockImageProvider();
-  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider) }); context.after(() => workbench.close());
+  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider), initial: createWorkbenchFixture() }); context.after(() => workbench.close());
   const item = imageItem(await workbench.snapshot());
   const input = await envelope(workbench, 'generation.submit', { itemId: item.id });
   // Invoke the same ActionExecutor without starting its consumer to simulate a crash between commit and dispatch.
@@ -178,7 +233,7 @@ test('late generation cannot overwrite edited inputs and duplicate submit cannot
   const root = await directory(context);
   let release!: () => void; const gate = new Promise<void>(accept => { release = accept; });
   const provider = new MockImageProvider(async () => gate);
-  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider) }); context.after(() => { release(); workbench.close(); });
+  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider), initial: createWorkbenchFixture() }); context.after(() => { release(); workbench.close(); });
   const item = imageItem(await workbench.snapshot());
   const submitted = success(await action(workbench, 'generation.submit', { itemId: item.id }));
   await waitUntil(async () => provider.calls === 1);
@@ -195,7 +250,7 @@ test('late generation cannot overwrite edited inputs and duplicate submit cannot
 
 test('cancel goes through an Action, invalidates the old token, and retains a terminal ledger without output', async context => {
   const root = await directory(context); const provider = new MockImageProvider(context => waitForProvider(100000, context.signal));
-  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider) }); context.after(() => workbench.close());
+  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider), initial: createWorkbenchFixture() }); context.after(() => workbench.close());
   const item = imageItem(await workbench.snapshot());
   const submitted = success(await action(workbench, 'generation.submit', { itemId: item.id }));
   const jobId = String(submitted.outcome.jobId);
@@ -210,7 +265,7 @@ test('cancel goes through an Action, invalidates the old token, and retains a te
 test('restart never re-submits an ambiguous running task without a persisted remote ID', async context => {
   const root = await directory(context); const provider = new MockImageProvider();
   const backend = runner(root, provider);
-  const workbench = await createWorkbench({ directory: root, runner: backend }); context.after(() => workbench.close());
+  const workbench = await createWorkbench({ directory: root, runner: backend, initial: createWorkbenchFixture() }); context.after(() => workbench.close());
   const item = imageItem(await workbench.snapshot());
   const caller = { actorId: 'local-gui', source: 'gui' as const, projectIds: new Set([WORKBENCH_PROJECT_ID]), permissions: new Set(['generation.submit'] as const) };
   const submitted = success(await workbench.executor.execute(await envelope(workbench, 'generation.submit', { itemId: item.id }), caller));
@@ -234,7 +289,7 @@ test('host shutdown preserves interrupted remote work and explicit resume querie
       await waitForProvider(100000, context.signal);
     } else assert.equal(context.providerTaskId, 'remote-original-task');
   });
-  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider) });
+  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider), initial: createWorkbenchFixture() });
   const item = imageItem(await workbench.snapshot());
   const submitted = success(await action(workbench, 'generation.submit', { itemId: item.id }));
   const jobId = String(submitted.outcome.jobId);
@@ -259,7 +314,7 @@ test('progress reads merge only the current attempt in memory without creating p
     context.reportProgress({ attemptToken: context.attemptToken, fraction: 0.2, stage: '等待' });
     await gate;
   });
-  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider) }); context.after(() => { release(); workbench.close(); });
+  const workbench = await createWorkbench({ directory: root, runner: runner(root, provider), initial: createWorkbenchFixture() }); context.after(() => { release(); workbench.close(); });
   const submitted = success(await action(workbench, 'generation.submit', { itemId: imageItem(await workbench.snapshot()).id }));
   const jobId = String(submitted.outcome.jobId);
   await waitUntil(async () => (await workbench.jobs()).items.some(job => job.id === jobId && job.progress === 0.65));

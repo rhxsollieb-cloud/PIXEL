@@ -1,7 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
-import { randomUUID, createHash } from 'node:crypto';
-import { parse as parseEnv } from 'dotenv';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { OpenRouter } from '@openrouter/sdk';
 import type { DeepReadonly, GenerationJob, GenerationRequest } from './contracts.js';
 import { generationRequestSchema } from './contracts.js';
@@ -10,30 +8,10 @@ import { modelRegistry } from './models.js';
 import { ElevenLabsModelProvider } from './providers/elevenlabs.js';
 import { OpenRouterModelProvider } from './providers/openrouter.js';
 import { FileArtifactStore, FileJobRepository } from './storage.js';
-
-export interface BackendConfiguration {
-  elevenlabsApiKey: string;
-  openrouterApiKey: string;
-  storageDirectory: string;
-}
-
-/** 后端专用；只选择已知配置键，不把整个 .env 注入前端或日志。 */
-export async function loadBackendConfiguration(options: {
-  envPath?: string;
-  environment?: NodeJS.ProcessEnv;
-  storageDirectory?: string;
-} = {}): Promise<BackendConfiguration> {
-  let file: Record<string, string> = {};
-  try { file = parseEnv(await readFile(resolve(options.envPath ?? '.env'))); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  const environment = options.environment ?? process.env;
-  const elevenlabsApiKey = (environment.ELEVENLABS_API_KEY ?? file.ELEVENLABS_API_KEY ?? '').trim();
-  const openrouterApiKey = (environment.OPENROUTER_API_KEY ?? file.OPENROUTER_API_KEY ?? '').trim();
-  if (!elevenlabsApiKey || !openrouterApiKey) {
-    throw new ProviderError('AUTHENTICATION', '后端配置需要 ELEVENLABS_API_KEY 和 OPENROUTER_API_KEY');
-  }
-  return { elevenlabsApiKey, openrouterApiKey, storageDirectory: resolve(options.storageDirectory ?? '.pixel') };
-}
+import type { BackendConfiguration } from './backend-configuration.js';
+import { generationInputFingerprint } from './generation-fingerprint.js';
+export { loadBackendConfiguration, type BackendConfiguration } from './backend-configuration.js';
+export { generationInputFingerprint } from './generation-fingerprint.js';
 
 export class ProviderRegistry {
   private readonly providers = new Map<string, BaseModelProvider>();
@@ -54,21 +32,6 @@ export interface RunGenerationOptions {
   interruptionReason?: unknown;
   onProgress?: (progress: GenerationProgress) => void;
   onJob?: (job: DeepReadonly<GenerationJob>) => void;
-}
-
-export function generationInputFingerprint(request: DeepReadonly<GenerationRequest>): string {
-  const canonical = (value: unknown): string => {
-    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-    if (value !== null && typeof value === 'object') {
-      const record = value as Record<string, unknown>;
-      return `{${Object.keys(record).filter(key => record[key] !== undefined).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
-    }
-    return JSON.stringify(value) ?? 'null';
-  };
-  return createHash('sha256').update(canonical({
-    providerId: request.providerId, providerVersion: request.providerVersion, modelId: request.modelId,
-    params: request.params, settings: request.settings, durationMs: request.durationMs, references: request.references,
-  })).digest('hex');
 }
 
 /** 后端任务执行闭环；项目 Action 的 outbox 消费者复用它，UI 不直接持有 SDK。 */

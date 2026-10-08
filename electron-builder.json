@@ -1,0 +1,14 @@
+{
+  "appId": "cloud.rhxsollieb.pixel",
+  "productName": "Pixel",
+  "directories": { "output": "release" },
+  "files": ["dist/**/*", "electron/main.mjs", "electron/preload.cjs", "electron/backend.mjs", "electron/export-tickets.mjs", "electron/icon.png", "package.json"],
+  "asar": true,
+  "npmRebuild": false,
+  "win": {
+    "icon": "electron/icon.ico",
+    "target": [{ "target": "portable", "arch": ["x64"] }],
+    "artifactName": "Pixel-${version}-Windows.${ext}",
+    "signExecutable": false
+  }
+}

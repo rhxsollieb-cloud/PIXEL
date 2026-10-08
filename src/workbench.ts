@@ -14,7 +14,8 @@ import type {
 import { generationRequestSchema } from './contracts.js';
 import { modelRegistry, modelQuerySchema } from './models.js';
 import { ProviderError, transitionJob, type GenerationProgress } from './generation.js';
-import { GenerationRunner, generationInputFingerprint } from './runtime.js';
+import type { GenerationRunner } from './runtime.js';
+import { generationInputFingerprint } from './generation-fingerprint.js';
 import { FileArtifactStore } from './storage.js';
 
 export const WORKBENCH_PROJECT_ID = 'pixel-project';
@@ -218,19 +219,6 @@ function captureRequest(document: ProjectDocument, item: TimelineItemData): Gene
 
 export function createInitialWorkbenchProject(): ProjectSnapshot {
   const document: ProjectDocument = { schemaVersion: 1, id: WORKBENCH_PROJECT_ID, title: '未命名作品', timelines: {}, items: {}, assets: {} };
-  const seeds: { model: string; params: JsonObject; duration: number }[] = [
-    { model: 'alibaba/wan-3.0', params: { prompt: '晨雾中的山谷，镜头缓慢向前推进，柔和的清晨光线', durationSeconds: 5 }, duration: 5000 },
-    { model: 'x-ai/grok-imagine-image-2.0', params: { prompt: '山谷的像素风格视觉草稿，层叠山峦，晨雾与柔和的暖光' }, duration: 5000 },
-    { model: 'music_v2_5', params: { prompt: '轻柔的钢琴与自然氛围，适合清晨山谷镜头，无歌词', musicLengthMs: 30000, forceInstrumental: true }, duration: 30000 },
-  ];
-  for (const seed of seeds) {
-    const plugin = modelRegistry.createPlugin(seed.model);
-    const timeline = plugin.createTimeline({ id: randomUUID(), modelId: seed.model, ticksPerSecond: 1000, settings: {} });
-    const item = plugin.createItem({ timeline, id: randomUUID(), startTick: 0, durationTicks: seed.duration, params: seed.params, generationToken: randomUUID() });
-    timeline.itemIds.push(item.id);
-    document.timelines[timeline.id] = timeline;
-    document.items[item.id] = item;
-  }
   return { revision: 0, document };
 }
 
@@ -310,11 +298,8 @@ export class Workbench {
     add('timeline.create', z.strictObject({ modelId: idSchema }), (document, { modelId }) => {
       const plugin = modelRegistry.createPlugin(modelId);
       const timeline = plugin.createTimeline({ id: randomUUID(), modelId, ticksPerSecond: 1000, settings: {} });
-      const item = plugin.createItem({ timeline, id: randomUUID(), startTick: 0, durationTicks: modelRegistry.resolve(modelId).outputKind === 'audio' ? 30000 : 5000, params: {}, generationToken: randomUUID() });
-      timeline.itemIds.push(item.id);
-      document.items[item.id] = item;
       document.timelines[timeline.id] = timeline;
-      return { timelineId: timeline.id, itemId: item.id };
+      return { timelineId: timeline.id };
     });
     add('timeline.settings', z.strictObject({ timelineId: idSchema, settings: jsonSchema }), (document, { timelineId, settings }) => {
       const timeline = timelineOf(document, timelineId);
@@ -328,7 +313,7 @@ export class Workbench {
       delete document.timelines[timelineId];
       return { timelineId };
     });
-    add('item.create', z.strictObject({ timelineId: idSchema, startTick: tickSchema, durationTicks: durationSchema.optional(), assetId: idSchema.optional() }), (document, input) => {
+    const createItem = (document: ProjectDocument, input: { timelineId: string; startTick: number; durationTicks?: number | undefined; assetId?: string | undefined }): JsonObject => {
       const timeline = timelineOf(document, input.timelineId);
       const descriptor = modelRegistry.resolve(timeline.modelId);
       const asset = input.assetId ? assetOf(document, input.assetId) : undefined;
@@ -342,7 +327,11 @@ export class Workbench {
       document.items[item.id] = item;
       timeline.itemIds.push(item.id);
       return { itemId: item.id };
-    });
+    };
+    // An empty generation request and placement of existing media have different
+    // preconditions and results, while sharing plugin validation and placement.
+    add('item.createDraft', z.strictObject({ timelineId: idSchema, startTick: tickSchema }), createItem);
+    add('item.create', z.strictObject({ timelineId: idSchema, startTick: tickSchema, durationTicks: durationSchema.optional(), assetId: idSchema }), createItem);
     this.registry.register(new MoveItemHandler((document, itemId, startTick) => {
       const current = document.items[itemId]!;
       placement(structuredClone(document) as ProjectDocument, current.timelineId, startTick, current.durationTicks, itemId);
