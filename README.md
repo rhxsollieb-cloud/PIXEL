@@ -4,7 +4,11 @@
 
 Eleven v4 已通过官方 Dialogue SDK 接入相邻文本参考及时间戳裁尾，具体规则与基类补齐说明见[默认配置与语音连续性升级](docs/timeline-defaults-and-speech.zh-CN.md)。
 
+Eleven v4 的默认配置详情现在直接显示声音选择、克隆音频文件选择、声纹名称和“克隆声纹”。默认声音、自己的克隆和手填声音 ID 共用一个 `voiceId` 字段；待验证或不可用项显示原因并禁用，已有 ID 保留。克隆接收单个不超过 25 MiB 的 MP3 / WAV，成功只创建账号声纹，选用后才修改默认配置，不自动改变已有片段。支持媒体参考的模型详情显示格式、数量限制和上传入口；Wan 首帧必须一张图，Grok 最多三张图，两者单图最多 25 MiB，其他模型按自己的能力提示。具体契约及设计评审见[声音、输入、分组与多轨预览](docs/voices-inputs-groups-and-composition.zh-CN.md)。
+
 已增加纯文本、普通视频、音频和图片时间线，全部复用时间线基类。右键时间线空白区 → 新建时间线 → 选择类型；文本轨空时间位置右键创建文本片段。媒体文件可直接拖入普通媒体轨，或时间线空白区域自动建对应轨并放置；外部文件与对象关系经过统一 `DragRegistry`，后台按真实字节和同类型目标校验。本地轨道不触发模型生成。契约、基类审查和原子放置规则见[本地时间线与扩展边界](docs/local-timelines-and-extension.zh-CN.md)。
+
+素材库可新建、改名和删除分组，每个素材通过分组字段归入一个组，并支持“全部素材”和“未分组”筛选；删除组保留素材及原始文件。时间线左侧的 ↕ 把手使用 dnd-kit 排序并保存顺序，上层轨道作为前景。Viewer 使用 Remotion Player 在 1280×720、16:9、60 fps 画布上预览同一时刻的多轨图像、视频及并发音频，与时间指针共用播放位置；纯文本参考和未生成草稿不进入画面。Viewer 原生拖出仍导出当前单个 output 文件，多轨合成文件导出尚未实现。
 
 外部 Agent 可读取文本参考：`npm run --silent timeline:text -- --project "C:\作品\项目" --format text`。改为 `--format json` 获取对象 ID、时间和版本；支持分页、时间及正文筛选，读取不加载模型凭证或修改项目。
 
@@ -14,6 +18,8 @@ npm run desktop
 ```
 
 Windows 可执行文件通过 `npm run package:win` 构建，输出在 `release/`。桌面运行、存储位置、像素视觉及验证说明见 [本地桌面与像素界面](docs/desktop-ui.zh-CN.md)。浏览器开发使用 `npm run dev`。
+
+当前锁定的 `remotion` / `@remotion/player` 4.0.534 使用 Remotion License。按依赖中的 `LICENSE.md`，个人、最多 3 名雇员的营利机构及非营利机构符合免费资格，可以制作商业视频和图像；不符合免费资格的机构需要 Company License。免费条款另禁止为销售、出租或再许可自己的 Remotion 衍生品而复制或修改其代码；这不是 MIT 许可。完整条件以[官方 LICENSE](https://github.com/remotion-dev/remotion/blob/main/LICENSE.md)和当前锁定依赖的许可文本为准，升级版本时重新核对对应条款。
 
 Windows 源码版可双击[启动Pixel.cmd](启动Pixel.cmd)。启动后将空文件夹拖入主窗口，即在该目录创建并打开空作品；已有 Pixel 项目目录或 `project.json` 同样拖入，在原位置继续编辑。媒体文件拖入素材库，Viewer 当前输出可原生拖出。规则及系统边界见[项目打开与系统拖拽](docs/project-open-and-system-drag.zh-CN.md)。
 
@@ -28,6 +34,9 @@ Windows 源码版可双击[启动Pixel.cmd](启动Pixel.cmd)。启动后将空�
 | [src/generation.ts](src/generation.ts) | 模型提供器基类、任务/产物接口、状态转换与旧结果检查 |
 | [src/models.ts](src/models.ts) | 五模型语义目录、字段、schema、参数规范化和纯 Timeline 插件 |
 | [src/providers/elevenlabs.ts](src/providers/elevenlabs.ts) / [openrouter.ts](src/providers/openrouter.ts) | 官方 SDK 适配器，音频、图像及异步视频生成 |
+| [src/voice-contracts.ts](src/voice-contracts.ts) / [voices.ts](src/voices.ts) / [elevenlabs-voices.ts](src/providers/elevenlabs-voices.ts) | 浏览器可读声纹契约、共享查询与克隆服务、独立账号资源回执和官方 SDK 适配 |
+| [src/reference-policy.ts](src/reference-policy.ts) | 模型引用的共同最小 / 最大数量规则 |
+| [web/asset-groups.tsx](web/asset-groups.tsx) / [composition-preview.tsx](web/composition-preview.tsx) | 素材分组字段和 Remotion 多轨预览；项目编辑继续经宿主 Action |
 | [src/runtime.ts](src/runtime.ts) / [storage.ts](src/storage.ts) | 后端配置、任务执行/恢复、文件 ledger 和媒体存储 |
 | [src/project-files.ts](src/project-files.ts) | 原位置项目校验、空目录初始化与模型、任务、素材完整性检查 |
 | [examples/move-clip.ts](examples/move-clip.ts) | 三种入口共用协议、重复提交只执行一次的示例 |
@@ -56,4 +65,4 @@ npm run example
 
 `npm run models` 查询共享模型目录。后端从 `.env` 读取 `ELEVENLABS_API_KEY` 与 `OPENROUTER_API_KEY`；密钥不进入前端或项目。`npm run generate -- --model MODEL_ID --params-file params.json` 是后端诊断 CLI，会调用真实模型并保存产物，可能产生费用。它使用 `backend-example` 请求，直接调用生成执行内核，不是当前 GUI 项目的 Action 入口，也不将产物自动挂载到该项目。Eleven v4 参数必须提供可用 `voiceId`；Wan / Grok 的设置可用 `--settings-file settings.json` 传入。视频中断恢复使用 `npm run generate -- --resume JOB_ID`，详见模型接入文档。
 
-当前已具备 Electron 桌面宿主、React 工作台、文件项目持久化、五模型字段、四种本地轨道、只读文本投影、生成提交 / outbox / 受控结果挂载、单进程任务和媒体存储，以及 Viewer 当前媒体的原生文件拖出。项目文件 / 目录打开与空目录初始化已接入，动态项目身份及独立 origin 保护会话切换。SDK 验证使用模拟 HTTP，未做付费生成测试。共同窗口宿主、非模态素材库与真实跨窗口对象 broker 已实现；浏览器开发版使用同源独立 popup（`?window=library`），复用同一 App / `PixelWindowHost`。本轮类型检查、152 项核心测试、19 项浏览器交互测试及原生验证通过，最终记录见[本地时间线与扩展边界](docs/local-timelines-and-extension.zh-CN.md)。正式项目 CLI / Agent 编辑适配器、共享 Action 能力查询、完整撤销重做、版本迁移与缺失插件占位、整条时间线合成导出仍按架构文档继续实现。继续源码开发模式，本轮未重新打包。
+当前已具备 Electron 桌面宿主、React 工作台、文件项目持久化、五模型字段、四种本地轨道、只读文本投影、生成提交 / outbox / 受控结果挂载、声纹查询与克隆命令、素材分组、时间线排序、多轨实时预览，以及 Viewer 当前媒体的原生文件拖出。项目文件 / 目录打开与空目录初始化已接入，动态项目身份及独立 origin 保护会话切换。模型生成及声纹 SDK 验证使用模拟 HTTP，未调用真实计费服务，也不能据此证明账号权限或生成质量；克隆回执绑定完整输入和 API key 的凭证作用域哈希，改换密钥不能复用旧回执，超时或结果未知时不盲目重提。共同窗口宿主、非模态素材库与真实跨窗口对象 broker 已实现；浏览器开发版使用同源独立 popup（`?window=library`），复用同一 App / `PixelWindowHost`。本轮变更及验证记录见[声音、输入、分组与多轨预览](docs/voices-inputs-groups-and-composition.zh-CN.md)。正式项目 CLI / Agent 编辑适配器、共享 Action 能力查询、完整撤销重做、版本迁移与缺失插件占位、多轨合成文件导出仍按架构文档继续实现。继续源码开发模式，本轮未重新打包。

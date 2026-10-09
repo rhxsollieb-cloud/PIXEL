@@ -1,0 +1,2 @@
+.timeline-sort-handle{flex:none;width:20px;height:24px;margin-right:4px;background:transparent;color:var(--pixel-muted);cursor:grab;touch-action:none}
+.timeline-sort-handle:active{cursor:grabbing}.timeline-sort-handle:hover:enabled,.timeline-sort-handle:focus-visible{color:var(--pixel-pink);background:var(--pixel-pink-soft)}

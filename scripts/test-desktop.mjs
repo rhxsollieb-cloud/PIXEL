@@ -431,6 +431,18 @@ try {
   await expect(ruler).toHaveAttribute('aria-valuenow', '13000');
   assert.deepEqual(await snapshot(workspace), beforeScrub);
   const viewer = workspace.getByTestId('viewer');
+  // Remotion can show several tracks; Viewer details belong to the current
+  // foreground Item, while the existing export checks still use its one file.
+  const viewerDetailOpened = desktop.waitForEvent('window');
+  await viewer.dblclick({ position: { x: 120, y: 120 } });
+  const viewerDetail = await viewerDetailOpened;
+  await expect(viewerDetail.getByRole('dialog', { name: '片段详情', exact: true })).toBeVisible();
+  await expect(viewerDetail.getByRole('dialog', { name: '素材详情', exact: true })).toHaveCount(0);
+  assert.deepEqual(await snapshot(viewerDetail), beforeScrub);
+  const viewerDetailClosed = viewerDetail.waitForEvent('close');
+  await viewerDetail.getByRole('button', { name: '关闭窗口', exact: true }).click().catch(error => { if (!viewerDetail.isClosed()) throw error; });
+  await viewerDetailClosed;
+  assert.deepEqual(await snapshot(workspace), beforeScrub);
   for (let drag = 0; drag < 2; drag++) {
     await mouseViewerExport(workspace, drag + 2);
   }
@@ -459,7 +471,7 @@ try {
   assert.equal(await workspace.evaluate(async () => (await window.pixelDesktop.openDroppedProject(new File(['{}'], 'project.json'))).ok), false);
   assert.deepEqual(await snapshot(workspace), beforeProjectDrop);
   await nativeFileDrop(workspace, viewer, foreignDirectory);
-  await expect(workspace.getByRole('status')).toContainText('项目');
+  await expect(workspace.locator('.workspace-feedback[role="status"]')).toContainText('项目');
   assert.deepEqual(await snapshot(workspace), beforeProjectDrop);
   assert.equal(await readFile(join(foreignDirectory, 'unrelated.txt'), 'utf8'), 'Original unrelated file');
   assert.equal(await readFile(join(storage, 'project.json'), 'utf8'), beforeFile);

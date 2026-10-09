@@ -11,13 +11,17 @@ import type {
   ActionEnvelope, ActionReceipt, ActionResult, AssetData, CallerContext, GenerationJob,
   GenerationRequest, JsonObject, ProjectChanged, ProjectDocument, ProjectSnapshot, TimelineItemData,
 } from './contracts.js';
+import { assetGroupTitleSchema, orderedTimelineIds } from './contracts.js';
 import { modelRegistry, modelQuerySchema } from './models.js';
 import { referenceLimit, timelineRegistry, timelineTypeQuerySchema } from './timeline-catalog.js';
+import { referenceExceedsByteLimit } from './reference-policy.js';
 import { probeMediaDuration } from './media-metadata.js';
 import { ProviderError, transitionJob, type GenerationProgress } from './generation.js';
 import type { GenerationRunner } from './runtime.js';
 import { generationInputFingerprint } from './generation-fingerprint.js';
 import { FileArtifactStore } from './storage.js';
+import type { VoiceService } from './voices.js';
+import type { VoiceCloneInput, VoiceCloneResult, VoiceQuery, VoicePage } from './voice-contracts.js';
 import { readWorkbenchProjectFile, validateWorkbenchProjectFile, workbenchOutboxSchema, type WorkbenchOutboxEntry as OutboxEntry, type WorkbenchProjectFile as WorkbenchFile } from './project-files.js';
 
 export const WORKBENCH_PROJECT_ID = 'pixel-project';
@@ -254,6 +258,7 @@ export interface WorkbenchOptions {
   runner?: GenerationRunner;
   providers?: { elevenlabs: boolean; openrouter: boolean };
   initial?: ProjectSnapshot;
+  voices?: VoiceService;
 }
 
 export class Workbench {
@@ -275,8 +280,10 @@ export class Workbench {
   private readonly mediaReads = new Set<AbortController>();
   private readonly caller: CallerContext;
   private readonly internal: CallerContext;
+  private voiceClosing: Promise<void> | undefined;
+  private readonly voiceExecutions = new Set<Promise<VoiceCloneResult>>();
 
-  constructor(readonly repository: FileWorkbenchRepository, readonly runner: GenerationRunner | undefined, directory: string, providers: { elevenlabs: boolean; openrouter: boolean }) {
+  constructor(readonly repository: FileWorkbenchRepository, readonly runner: GenerationRunner | undefined, directory: string, providers: { elevenlabs: boolean; openrouter: boolean }, readonly voices?: VoiceService) {
     this.projectId = repository.projectId;
     this.caller = { actorId: 'local-gui', source: 'gui', projectIds: new Set([this.projectId]), permissions: new Set(['project.edit', 'generation.submit']) };
     this.internal = { actorId: 'generation-host', source: 'internal', projectIds: new Set([this.projectId]), permissions: new Set(['generation.apply']) };
@@ -315,16 +322,48 @@ export class Workbench {
     return result;
   }
   async initialize(): Promise<void> { await this.jobs(); await this.drain(); }
-  close(): void { this.closing = true; for (const controller of [...this.active.values(), ...this.mediaReads]) if (!controller.signal.aborted) controller.abort(this.shutdownReason); this.listeners.clear(); }
+  close(): void { this.closing = true; for (const controller of [...this.active.values(), ...this.mediaReads]) if (!controller.signal.aborted) controller.abort(this.shutdownReason); this.voiceClosing ??= this.voices?.shutdown(); this.listeners.clear(); }
   async shutdown(): Promise<void> {
     this.close();
-    await Promise.allSettled([...this.drains, ...this.executions, ...this.imports.values()]);
+    await Promise.allSettled([...this.drains, ...this.executions, ...this.imports.values(), ...this.voiceExecutions, ...(this.voiceClosing ? [this.voiceClosing] : [])]);
     await this.repository.read(this.projectId);
   }
   timelineTypes(input: unknown = {}) {
     const parsed = timelineTypeQuerySchema.safeParse(input);
     if (!parsed.success) throw new DomainError('INVALID_INPUT', '时间线查询条件无效');
     return timelineRegistry.query(parsed.data);
+  }
+  async queryVoices(input: VoiceQuery): Promise<VoicePage> {
+    if (this.closing) throw new DomainError('NOT_APPLICABLE', '项目会话已关闭');
+    if (!this.voices) throw new DomainError('NOT_APPLICABLE', '请先配置 ElevenLabs 后端密钥以读取声音');
+    return this.voices.query(input);
+  }
+  /** 账号资源命令不修改项目；选择结果另经原字段 Action，不能晚到覆盖默认。 */
+  async cloneVoice(input: VoiceCloneInput): Promise<VoiceCloneResult> {
+    if (input.projectId !== this.projectId) throw new DomainError('FORBIDDEN', '声音克隆不属于当前项目');
+    // WAV MIME aliases describe the same sample; normalize before probing and receipt binding.
+    if (input.mimeType === 'audio/x-wav' || input.mimeType === 'audio/wave') input = { ...input, mimeType: 'audio/wav' };
+    if (this.closing) throw new DomainError('NOT_APPLICABLE', '项目会话已关闭');
+    if (!this.voices) throw new DomainError('NOT_APPLICABLE', '请先配置 ElevenLabs 后端密钥以克隆声音');
+    const operation = (async () => {
+      const snapshot = await this.snapshot();
+      const timeline = timelineOf(snapshot.document, input.timelineId);
+      const declaration = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
+      if (!declaration.fields.some(field => field.choicesSource?.kind === 'providerVoice' && field.choicesSource.providerId === 'elevenlabs')) throw new DomainError('NOT_APPLICABLE', '此时间线不支持声音克隆');
+      const replay = await this.voices!.replay(input);
+      if (replay) return replay;
+      if (snapshot.revision !== input.expectedRevision) throw new DomainError('REVISION_CONFLICT', '项目已更新，请重新读取后重试');
+      if (input.bytes.length > 25 * 1024 * 1024 || !['audio/wav', 'audio/mpeg'].includes(input.mimeType) || detectMedia(input.bytes, input.mimeType) !== 'audio') throw new DomainError('INVALID_INPUT', '请选择不超过 25 MiB 的 MP3 或 WAV 声音文件');
+      const controller = new AbortController(); this.mediaReads.add(controller);
+      try { await probeMediaDuration(input.bytes, 'audio', input.mimeType, controller.signal); }
+      finally { this.mediaReads.delete(controller); }
+      if (this.closing) throw new DomainError('NOT_APPLICABLE', '项目会话已关闭');
+      const current = await this.snapshot();
+      if (current.revision !== input.expectedRevision) throw new DomainError('REVISION_CONFLICT', '项目已更新，声音尚未提交，请重试');
+      return this.voices!.clone(input);
+    })();
+    this.voiceExecutions.add(operation);
+    try { return await operation; } finally { this.voiceExecutions.delete(operation); }
   }
   private scheduleDrain(): void {
     const drain = this.drain().catch(() => {}).finally(() => this.drains.delete(drain));
@@ -336,6 +375,27 @@ export class Workbench {
       this.registry.register(new WorkbenchHandler(type, schema, operation, permission, history));
     };
     add('project.title', z.strictObject({ title: z.string().trim().min(1).max(120) }), (document, { title }) => { document.title = title; return { title }; });
+    add('assetGroup.create', z.strictObject({ title: assetGroupTitleSchema }), (document, { title }) => {
+      const group = { id: randomUUID(), title, assetIds: [] as string[] };
+      (document.assetGroups ??= {})[group.id] = group;
+      return { groupId: group.id };
+    });
+    const groupOf = (document: ProjectDocument, groupId: string) => {
+      if (!document.assetGroups || !Object.hasOwn(document.assetGroups, groupId)) throw new DomainError('NOT_FOUND', '素材分组不存在');
+      return document.assetGroups[groupId]!;
+    };
+    add('assetGroup.rename', z.strictObject({ groupId: idSchema, title: assetGroupTitleSchema }), (document, { groupId, title }) => {
+      groupOf(document, groupId).title = title; return { groupId };
+    });
+    add('assetGroup.remove', z.strictObject({ groupId: idSchema }), (document, { groupId }) => {
+      groupOf(document, groupId); delete document.assetGroups![groupId]; return { groupId };
+    });
+    add('assetGroup.moveAsset', z.strictObject({ assetId: idSchema, groupId: idSchema.optional() }), (document, { assetId, groupId }) => {
+      assetOf(document, assetId);
+      const destination = groupId === undefined ? undefined : groupOf(document, groupId);
+      for (const group of Object.values(document.assetGroups ?? {})) group.assetIds = group.assetIds.filter(id => id !== assetId);
+      destination?.assetIds.push(assetId); return { assetId, groupId: groupId ?? null };
+    });
     add('timeline.create', z.union([z.strictObject({ modelId: idSchema }), z.strictObject({ typeId: idSchema })]), (document, input) => {
       const typeId = 'typeId' in input ? input.typeId : input.modelId;
       const declaration = timelineRegistry.describe(typeId);
@@ -343,7 +403,17 @@ export class Workbench {
       const plugin = timelineRegistry.createPlugin(typeId);
       const timeline = plugin.createTimeline({ id: randomUUID(), ...(declaration.modelId === undefined ? {} : { modelId: declaration.modelId }), ticksPerSecond: 1000, settings: {} });
       document.timelines[timeline.id] = timeline;
+      if (document.timelineOrder) document.timelineOrder.push(timeline.id);
       return { timelineId: timeline.id };
+    });
+    add('timeline.reorder', z.strictObject({ timelineId: idSchema, beforeTimelineId: idSchema.optional() }), (document, { timelineId, beforeTimelineId }) => {
+      timelineOf(document, timelineId);
+      if (beforeTimelineId !== undefined) timelineOf(document, beforeTimelineId);
+      if (beforeTimelineId === timelineId) throw new DomainError('INVALID_INPUT', '时间线不能以自身作为移动目标');
+      const order = orderedTimelineIds(document).filter(id => id !== timelineId);
+      const index = beforeTimelineId === undefined ? order.length : order.indexOf(beforeTimelineId);
+      order.splice(index, 0, timelineId); document.timelineOrder = order;
+      return { timelineId, timelineOrder: order };
     });
     add('timeline.settings', z.strictObject({ timelineId: idSchema, settings: jsonSchema }), (document, { timelineId, settings }) => {
       const timeline = timelineAction(document, timelineId, 'timeline.settings');
@@ -390,6 +460,7 @@ export class Workbench {
       const timeline = timelineAction(document, timelineId, 'timeline.delete');
       timeline.itemIds.forEach(id => { delete document.items[id]; });
       delete document.timelines[timelineId];
+      if (document.timelineOrder) document.timelineOrder = document.timelineOrder.filter(id => id !== timelineId);
       return { timelineId };
     });
     const createItem = (document: ProjectDocument, input: { timelineId: string; startTick: number; durationTicks?: number | undefined; assetId?: string | undefined }): JsonObject => {
@@ -424,6 +495,7 @@ export class Workbench {
         const plugin = timelineRegistry.createPlugin(`pixel.${input.asset.kind}.local`);
         timeline = plugin.createTimeline({ id: randomUUID(), ticksPerSecond: 1000, settings: {} });
         document.timelines[timeline.id] = timeline;
+        if (document.timelineOrder) document.timelineOrder.push(timeline.id);
       }
       document.assets[input.asset.id] = input.asset;
       const outcome = createItem(document, { timelineId: timeline.id, startTick: input.startTick, assetId: input.asset.id });
@@ -468,18 +540,25 @@ export class Workbench {
       document.items[item.id] = item; timeline.itemIds.push(item.id);
       return { itemId: item.id };
     });
-    add('item.reference.add', z.strictObject({ itemId: idSchema, assetId: idSchema }), (document, { itemId, assetId }) => {
+    const addReference = (document: ProjectDocument, { itemId, assetId }: { itemId: string; assetId: string }): JsonObject => {
       const item = itemOf(document, itemId);
       const asset = assetOf(document, assetId);
       const timeline = timelineAction(document, item.timelineId, 'item.reference.add');
       const descriptor = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
       if (!descriptor.capabilities.references) throw new DomainError('NOT_APPLICABLE', '该时间线不支持素材引用');
       if (!descriptor.referenceKinds.includes(asset.kind)) throw new DomainError('NOT_APPLICABLE', '该模型不支持这种引用媒体');
+      if (referenceExceedsByteLimit(descriptor, asset.metadata.byteLength)) throw new DomainError('NOT_APPLICABLE', `参考文件超出模型声明的 ${descriptor.referenceMaxBytes! / 1024 / 1024} MiB 上限`);
       if (item.referenceAssetIds.includes(assetId)) throw new DomainError('NOT_APPLICABLE', '引用已存在');
       const maximum = referenceLimit(descriptor, item.params);
       if (item.referenceAssetIds.length >= maximum) throw new DomainError('NOT_APPLICABLE', '该模型的引用数量已达到上限');
       item.referenceAssetIds.push(assetId); invalidate(document, item);
       return { itemId, assetId };
+    };
+    add('item.reference.add', z.strictObject({ itemId: idSchema, assetId: idSchema }), addReference);
+    add('media.referenceExternal', z.strictObject({ itemId: idSchema, asset: assetSchema }), (document, { itemId, asset }, caller) => {
+      if (caller.source !== 'internal') throw new DomainError('FORBIDDEN', '参考文件必须先由宿主验证');
+      document.assets[asset.id] = asset;
+      return { ...addReference(document, { itemId, assetId: asset.id }), importFingerprint: asset.metadata.importFingerprint ?? null };
     });
     add('item.reference.remove', z.strictObject({ itemId: idSchema, assetId: idSchema }), (document, { itemId, assetId }) => {
       const item = itemOf(document, itemId);
@@ -496,7 +575,9 @@ export class Workbench {
     add('asset.remove', z.strictObject({ assetId: idSchema }), (document, { assetId }) => {
       assetOf(document, assetId);
       if (Object.values(document.items).some(item => item.outputAssetId === assetId || item.referenceAssetIds.includes(assetId))) throw new DomainError('NOT_APPLICABLE', '资产仍被片段使用，请先删除片段或解除引用');
-      delete document.assets[assetId]; return { assetId };
+      delete document.assets[assetId];
+      for (const group of Object.values(document.assetGroups ?? {})) group.assetIds = group.assetIds.filter(id => id !== assetId);
+      return { assetId };
     });
     add('asset.saveFromItem', z.strictObject({ itemId: idSchema }), (document, { itemId }) => {
       const item = itemOf(document, itemId);
@@ -553,7 +634,10 @@ export class Workbench {
   placeExternalMedia(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number; startTick: number; timelineId?: string }): Promise<ActionResult> {
     return this.verifiedMediaTransaction(input, 'media.placeExternal', { startTick: input.startTick, ...(input.timelineId === undefined ? {} : { timelineId: input.timelineId }) });
   }
-  private async verifiedMediaTransaction(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number }, actionType: 'asset.import' | 'media.placeExternal', destination: JsonObject): Promise<ActionResult> {
+  importReferenceMedia(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number; itemId: string }): Promise<ActionResult> {
+    return this.verifiedMediaTransaction(input, 'media.referenceExternal', { itemId: input.itemId });
+  }
+  private async verifiedMediaTransaction(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number }, actionType: 'asset.import' | 'media.placeExternal' | 'media.referenceExternal', destination: JsonObject): Promise<ActionResult> {
     if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
     const fingerprint = createHash('sha256').update(canonical({ mimeType: input.mimeType, name: input.name, expectedRevision: input.expectedRevision, ...(actionType === 'asset.import' ? {} : { actionType, destination }) })).update(input.bytes).digest('hex');
     const previous = this.imports.get(input.requestId);
@@ -565,6 +649,14 @@ export class Workbench {
       if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
       if (snapshot.revision !== input.expectedRevision) return { ok: false, requestId: input.requestId, error: { code: 'REVISION_CONFLICT', message: '项目已更新，请重新读取后重试' } };
       const kind = detectMedia(input.bytes, input.mimeType);
+      if (actionType === 'media.referenceExternal') {
+        const item = itemOf(snapshot.document, String(destination.itemId));
+        const timeline = timelineAction(snapshot.document, item.timelineId, 'item.reference.add');
+        const declaration = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
+        if (!declaration.capabilities.references || !declaration.referenceKinds.includes(kind)) throw new DomainError('NOT_APPLICABLE', '此模型不支持这种参考文件');
+        if (referenceExceedsByteLimit(declaration, input.bytes.byteLength)) throw new DomainError('INVALID_INPUT', `参考文件超出模型声明的 ${declaration.referenceMaxBytes! / 1024 / 1024} MiB 上限`);
+        if (item.referenceAssetIds.length >= referenceLimit(declaration, item.params)) throw new DomainError('NOT_APPLICABLE', '参考文件数量已达上限');
+      }
       let durationMs: number | undefined;
       // 库导入与直接放置共享同一个可信探测入口，后续 item.create 不猜测源媒体时长。
       if (kind !== 'image') {
@@ -686,7 +778,7 @@ export function detectMedia(bytes: Uint8Array, mimeType: string): AssetData['kin
 export async function createWorkbench(options: WorkbenchOptions = {}): Promise<Workbench> {
   const directory = resolve(options.directory ?? '.pixel');
   const repository = await FileWorkbenchRepository.open(directory, options.initial ?? createInitialWorkbenchProject());
-  const workbench = new Workbench(repository, options.runner, directory, options.providers ?? { elevenlabs: Boolean(options.runner), openrouter: Boolean(options.runner) });
+  const workbench = new Workbench(repository, options.runner, directory, options.providers ?? { elevenlabs: Boolean(options.runner), openrouter: Boolean(options.runner) }, options.voices);
   await workbench.initialize();
   return workbench;
 }

@@ -1,4 +1,5 @@
 import { generationRequestSchema } from './contracts.js';
+import { MAX_IMAGE_REFERENCE_BYTES } from './reference-policy.js';
 import { z } from 'zod';
 import type {
   AssetData,
@@ -173,7 +174,7 @@ export async function referenceDataUrl(asset: DeepReadonly<AssetData>, context: 
   const content = await context.media.read(asset, context.signal);
   context.signal.throwIfAborted();
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(content.mimeType)
-      || !content.bytes.byteLength || content.bytes.byteLength > 25 * 1024 * 1024) {
+      || !content.bytes.byteLength || content.bytes.byteLength > MAX_IMAGE_REFERENCE_BYTES) {
     throw new ProviderError('UNSUPPORTED_REFERENCE', '引用图片格式或大小不受支持');
   }
   // fileRef 只交给宿主读取，不能转换成任意远程 URL 或公开本地路径。
@@ -306,7 +307,7 @@ export type GenerationEvent =
 
 /**
  * 调度器契约；此骨架不实现 worker 或网络调用。
- * 完成只保存 Artifact 和 Job，通过独立、可撤销的 generation.applyResult Action 挂载产物。
+ * 完成只保存 Artifact 和 Job，通过独立、可撤销的 generation.apply Action 挂载产物。
  */
 export interface GenerationCoordinator {
   submit(request: GenerationRequest): Promise<DeepReadonly<GenerationJob>>;

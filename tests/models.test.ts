@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GenerationReference, GenerationRequest, JsonObject } from '../src/contracts.js';
-import { ProviderError } from '../src/generation.js';
+import { ProviderError, referenceDataUrl, type ProviderRunContext } from '../src/generation.js';
+import { MAX_IMAGE_REFERENCE_BYTES } from '../src/reference-policy.js';
+import { TimelineRegistry } from '../src/timeline-catalog.js';
 import {
   builtinModelDescriptors, grokImageSettingsSchema, modelRegistry, ModelRegistry,
   musicGenerationParamsSchema, musicParamsSchema, speechGenerationParamsSchema,
@@ -155,6 +157,34 @@ test('引用能力和角色在共同边界校验；所有音频模型显式拒�
   ] as [string, JsonObject][]) {
     assert.throws(() => modelRegistry.prepareRequest({ ...request(modelId, params), references: [image()] }), code('UNSUPPORTED_REFERENCE'));
   }
+});
+
+test('model and timeline declarations share byte limits, preserve absent legacy metadata, and reject known oversized references', () => {
+  for (const modelId of ['alibaba/wan-3.0', 'x-ai/grok-imagine-image-2.0']) {
+    assert.equal(modelRegistry.resolve(modelId).referenceMaxBytes, MAX_IMAGE_REFERENCE_BYTES);
+    assert.equal(modelRegistry.describe(modelId).referenceMaxBytes, MAX_IMAGE_REFERENCE_BYTES);
+    const input = { ...request(modelId, { prompt: 'scene' }), references: [{ ...image(), metadata: { byteLength: MAX_IMAGE_REFERENCE_BYTES } }] };
+    assert.equal(modelRegistry.prepareRequest(input).references.length, 1);
+    assert.equal(modelRegistry.prepareRequest({ ...input, references: [image()] }).references.length, 1);
+    assert.throws(() => modelRegistry.prepareRequest({ ...input, references: [{ ...image(), metadata: { byteLength: MAX_IMAGE_REFERENCE_BYTES + 1 } }] }), code('UNSUPPORTED_REFERENCE'));
+  }
+  assert.equal(modelRegistry.describe('eleven_v4').referenceMaxBytes, undefined);
+  const descriptor = { ...builtinModelDescriptors.find(model => model.outputKind === 'image')!, modelId: 'custom/image', pluginId: 'custom.image', referenceMaxBytes: 8 };
+  const registry = new ModelRegistry([descriptor]); const timelines = new TimelineRegistry(registry);
+  assert.equal(timelines.describe(descriptor.modelId).referenceMaxBytes, 8);
+  assert.equal(timelines.describe('pixel.text').referenceMaxBytes, undefined);
+  const input = { ...request('x-ai/grok-imagine-image-2.0', { prompt: 'custom' }), modelId: descriptor.modelId, references: [{ ...image(), metadata: { byteLength: 8 } }] };
+  assert.equal(registry.prepareRequest(input).references.length, 1);
+  assert.throws(() => registry.prepareRequest({ ...input, references: [{ ...image(), metadata: { byteLength: 9 } }] }), code('UNSUPPORTED_REFERENCE'));
+});
+
+test('the controlled SDK reader still rejects oversized actual bytes when historical metadata omits its length', async () => {
+  const context: ProviderRunContext = { signal: new AbortController().signal, attemptToken: { jobId: 'test', attempt: 1 },
+    reportProgress: () => {}, checkpointProviderTask: async () => {}, artifacts: { write: async () => { throw new Error('No artifact should be written'); } },
+    media: { read: async () => ({ mimeType: 'image/png', bytes: new Uint8Array(MAX_IMAGE_REFERENCE_BYTES + 1) }) } };
+  await assert.rejects(referenceDataUrl(image(), context), code('UNSUPPORTED_REFERENCE'));
+  context.media = { read: async () => ({ mimeType: 'image/png', bytes: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhUYAAAAASUVORK5CYII=', 'base64') }) };
+  assert.match(await referenceDataUrl(image(), context), /^data:image\/png;base64,/);
 });
 
 test('规范化请求与返回字段schema不污染调用者输入', () => {

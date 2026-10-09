@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { JsonObject, JsonValue } from '../src/contracts.js';
 import type { PluginFieldDeclaration } from '../src/plugins.js';
 import { PixelField, PixelInput, PixelSelect, PixelTextarea, PixelIcon } from './ui/index.js';
+import { ProviderVoiceField } from './voice-field.js';
 
 export type FieldPath = (string | number)[];
 const labels: Record<string,string> = {
@@ -58,10 +59,11 @@ interface FieldEditorProps {
   value: JsonValue | undefined;
   schema: JsonObject;
   disabled?: boolean;
+  choicesRefresh?: number;
   onCommit: (value: JsonValue) => Promise<boolean>;
   onOpen: () => void;
 }
-export function FieldEditor({field,value,schema,disabled = false,onCommit,onOpen}: FieldEditorProps) {
+export function FieldEditor({field,value,schema,disabled = false,choicesRefresh=0,onCommit,onOpen}: FieldEditorProps) {
   const initial = value === null || value === undefined ? '' : Array.isArray(value) && !field.children ? value.join('\n') : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const [draft,setDraft] = useState(initial);
   const [error,setError] = useState('');
@@ -91,6 +93,7 @@ export function FieldEditor({field,value,schema,disabled = false,onCommit,onOpen
     }
   };
   const description = field.nullable ? '留空时使用模型默认值' : undefined;
+  if(field.choicesSource?.kind==='providerVoice')return <ProviderVoiceField label={fieldLabel(field)} value={typeof value==='string'?value:''} disabled={disabled} refreshKey={choicesRefresh} onCommit={next=>onCommit(next)}/>;
   if(field.valueType === 'object' || (field.valueType === 'array' && field.children)) {
     const count = Array.isArray(value) ? value.length : value && typeof value === 'object' ? Object.keys(value).length : 0;
     return <PixelField label={fieldLabel(field)}>

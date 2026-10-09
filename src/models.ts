@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_IMAGE_REFERENCE_BYTES, referenceExceedsByteLimit, referenceLimit, referenceMinimum } from './reference-policy.js';
 import type {
   DeepReadonly, GenerationRequest, JsonObject, JsonValue, MediaKind,
 } from './contracts.js';
@@ -145,7 +146,8 @@ export interface ModelDescriptor {
   generationDuration: 'natural' | 'parameter' | 'still';
   referenceKinds: readonly MediaKind[];
   maxReferences: number;
-  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number }[];
+  referenceMaxBytes?: number;
+  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number; minimum?: number }[];
   referenceLimitSource: 'endpoint' | 'host';
   fields: readonly PluginFieldDeclaration[];
   /** 配置默认值仅允许显式非正文参数，不从参数schema猜测内容语义。 */
@@ -194,7 +196,7 @@ const modelDefinitions: readonly ModelDefinition[] = [
     contextMaxCharacters: 100,
     fields: [
       settingsOutputField(speechMp3Formats), promptField('text'),
-      { scope: 'itemParams', key: 'voiceId', label: 'Voice', valueType: 'string' },
+      { scope: 'itemParams', key: 'voiceId', label: 'Voice', valueType: 'string', choicesSource: { kind: 'providerVoice', providerId: 'elevenlabs', modelId: 'eleven_v4' } },
       { scope: 'itemParams', key: 'languageCode', label: 'Language code', valueType: 'string', nullable: true },
       seedField,
       { scope: 'itemParams', key: 'voiceSettings', label: 'Voice settings', valueType: 'object', nullable: true,
@@ -260,7 +262,8 @@ const modelDefinitions: readonly ModelDefinition[] = [
     pluginId: 'pixel.openrouter.wan', itemKind: 'video.generated', title: 'Alibaba: Wan 3.0',
     description: 'Generate video from text, first-frame input or reference images.',
     outputKind: 'video', generationDuration: 'parameter', referenceKinds: ['image'], maxReferences: 3, referenceLimitSource: 'host',
-    referenceLimits: [{ field: 'referenceMode', equals: 'firstFrame', maximum: 1 }],
+    referenceMaxBytes: MAX_IMAGE_REFERENCE_BYTES,
+    referenceLimits: [{ field: 'referenceMode', equals: 'firstFrame', maximum: 1, minimum: 1 }],
     settingsSchema: wanSettingsSchema, paramsSchema: wanParamsSchema, generationParamsSchema: wanGenerationParamsSchema,
     referenceTextFields: ['prompt'], requiredTextFields: ['prompt'],
     fields: [
@@ -276,6 +279,7 @@ const modelDefinitions: readonly ModelDefinition[] = [
     pluginId: 'pixel.openrouter.grokImage', itemKind: 'image.generated', title: 'Grok Imagine Image 2.0',
     description: 'Generate or edit one image using a prompt and up to three reference images.',
     outputKind: 'image', generationDuration: 'still', referenceKinds: ['image'], maxReferences: 3, referenceLimitSource: 'endpoint',
+    referenceMaxBytes: MAX_IMAGE_REFERENCE_BYTES,
     settingsSchema: grokImageSettingsSchema, paramsSchema: grokImageParamsSchema, generationParamsSchema: grokImageGenerationParamsSchema,
     referenceTextFields: ['prompt'], requiredTextFields: ['prompt'],
     fields: [
@@ -316,7 +320,8 @@ export interface ModelDeclaration {
   generationDuration: ModelDescriptor['generationDuration'];
   referenceKinds: MediaKind[];
   maxReferences: number;
-  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number }[];
+  referenceMaxBytes?: number;
+  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number; minimum?: number }[];
   referenceLimitSource: ModelDescriptor['referenceLimitSource'];
   fields: PluginFieldDeclaration[];
   defaultFields: PluginFieldDeclaration[];
@@ -419,10 +424,11 @@ export class ModelRegistry {
     const params = descriptor.generationParamsSchema.parse(paramsInput);
     const settings = descriptor.settingsSchema.parse(request.settings ?? {});
     const references = structuredClone(request.references) as GenerationRequest['references'];
-    if (references.length > descriptor.maxReferences) throw new ProviderError('UNSUPPORTED_REFERENCE', 'The model reference asset limit was exceeded');
+    if (references.length > referenceLimit(descriptor, params) || references.length < referenceMinimum(descriptor, params)) throw new ProviderError('UNSUPPORTED_REFERENCE', 'The model reference asset count is outside its declared range');
     if (new Set(references.map(reference => reference.id)).size !== references.length) throw new ProviderError('UNSUPPORTED_REFERENCE', 'Reference asset IDs must be unique');
     for (const reference of references) {
       if (!descriptor.referenceKinds.includes(reference.kind)) throw new ProviderError('UNSUPPORTED_REFERENCE', 'The model does not accept this reference media kind');
+      if (referenceExceedsByteLimit(descriptor, reference.metadata.byteLength)) throw new ProviderError('UNSUPPORTED_REFERENCE', 'The reference file exceeds the model byte limit');
       if (reference.role !== undefined && !['reference', 'first-frame', 'last-frame'].includes(reference.role)) throw new ProviderError('UNSUPPORTED_REFERENCE', 'Unknown generation reference role');
       if (reference.role === 'last-frame') throw new ProviderError('UNSUPPORTED_REFERENCE', 'This model does not support last-frame references');
       if (descriptor.outputKind === 'image' && reference.role === 'first-frame') throw new ProviderError('UNSUPPORTED_REFERENCE', 'Image generation does not have frame reference roles');

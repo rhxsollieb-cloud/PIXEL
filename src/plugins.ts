@@ -12,6 +12,8 @@ export interface PluginFieldDeclaration {
   nullable?: boolean;
   description?: string;
   options?: readonly { value: string; label: string }[];
+  /** 动态账号资源仍是字段选择，凭证与查询由可信宿主提供。 */
+  choicesSource?: { kind: 'providerVoice'; providerId: string; modelId: string };
 }
 
 export interface TimelinePluginManifest {

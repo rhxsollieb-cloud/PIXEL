@@ -3,7 +3,7 @@ import { open, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { assertProjectInvariants, DomainError, type HistoryEntry } from './backend.js';
-import { generationRequestSchema, type ActionReceipt, type AssetData, type GenerationRequest, type ProjectDocument, type ProjectSnapshot } from './contracts.js';
+import { assetGroupsSchema, generationRequestSchema, timelineOrderSchema, type ActionReceipt, type AssetData, type GenerationRequest, type ProjectDocument, type ProjectSnapshot } from './contracts.js';
 import { modelRegistry } from './models.js';
 import { referenceLimit, timelineRegistry } from './timeline-catalog.js';
 
@@ -45,6 +45,8 @@ const itemSchema = z.strictObject({
 const documentSchema = z.strictObject({
   schemaVersion: z.literal(1), id, title: z.string().min(1).max(200),
   timelines: z.record(id, timelineSchema), items: z.record(id, itemSchema), assets: z.record(z.uuid(), assetSchema),
+  assetGroups: assetGroupsSchema.optional(),
+  timelineOrder: timelineOrderSchema.optional(),
 });
 const receiptSchema = z.strictObject({
   ok: z.literal(true), requestId: id, projectId: id, revision: tick, undoable: z.boolean(), outcome: json,

@@ -4,6 +4,7 @@ import type { DeepReadonly, ProjectSnapshot } from '../src/contracts.js';
 import type { ContextActionContext, DragContext } from '../src/frontend.js';
 import { modelRegistry } from '../src/models.js';
 import { timelineRegistry } from '../src/timeline-catalog.js';
+import { MAX_IMAGE_REFERENCE_BYTES } from '../src/reference-policy.js';
 import { createInteractionHost, declarationForTimeline } from '../web/interaction.js';
 
 function referenceProject(modelId = 'alibaba/wan-3.0', referenceMode = 'reference'): ProjectSnapshot {
@@ -58,6 +59,11 @@ test('Wan first-frame reference drag obeys the single-image limit before submitt
 
   // Changing the object's mode changes the available relationship immediately.
   project.document.items.item!.params.referenceMode = 'reference';
+  assert.equal(host.drag.hover(secondImage).status, 'available');
+  project.document.assets.second!.metadata.byteLength = MAX_IMAGE_REFERENCE_BYTES + 1;
+  assert.deepEqual(host.drag.hover(secondImage), { status: 'disabled', reason: '参考文件单个最多 25 MiB' });
+  assert.equal(host.drag.drop(secondImage), undefined);
+  project.document.assets.second!.metadata.byteLength = MAX_IMAGE_REFERENCE_BYTES;
   assert.equal(host.drag.hover(secondImage).status, 'available');
   project.document.items.item!.referenceAssetIds.push('second', 'third');
   assert.equal(host.drag.drop(referenceDrop(project, 'fourth')), undefined);
@@ -227,4 +233,13 @@ test('valid persisted model aliases resolve catalog fields without rewriting pro
   assert.equal(declaration?.fields.some(field=>field.key==='text'),true);
   assert.equal(interaction().menu.commandFor('generation.submit',{project,target:{kind:'item',projectId:'project',id:'item'}})?.type,'generation.submit');
   assert.deepEqual(project,unchanged);
+});
+
+test('voice clone and external reference upload have one visible detail command path',()=>{
+  const host=interaction();const project=referenceProject('eleven_v4');
+  assert.equal(host.paths.getPath('voice.clone'),'detail:timeline-voice-clone');
+  assert.equal(host.paths.getPath('media.referenceExternal'),'detail:item-reference-upload');
+  const target={kind:'timeline' as const,projectId:'project',id:'timeline'};
+  assert.equal(host.menu.list({project,target}).some(action=>action.id==='voice.clone'),false);
+  assert.equal(host.menu.list({project,target}).some(action=>action.id==='media.referenceExternal'),false);
 });

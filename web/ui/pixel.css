@@ -40,9 +40,11 @@
 .pixel-progress__label { display: flex; justify-content: space-between; gap: 8px; color: var(--pixel-muted); }
 .pixel-progress__track { height: 4px; background: var(--pixel-line); }
 .pixel-progress__fill { height: 100%; background: var(--pixel-cyan); transition: width .2s steps(8, end); }
-.pixel-context-menu { position: fixed; z-index: 1200; width: 256px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; padding: 4px; background: var(--pixel-surface); border: 1px solid #b7c5dd; box-shadow: var(--pixel-shadow); clip-path: polygon(4px 0, calc(100% - 4px) 0, calc(100% - 4px) 4px, 100% 4px, 100% calc(100% - 4px), calc(100% - 4px) calc(100% - 4px), calc(100% - 4px) 100%, 4px 100%, 4px calc(100% - 4px), 0 calc(100% - 4px), 0 4px, 4px 4px); }
+.pixel-context-menu { position: fixed; z-index: 1200; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-x: auto; overflow-y: hidden; padding: 4px; background: var(--pixel-surface); border: 1px solid #b7c5dd; box-shadow: var(--pixel-shadow); clip-path: polygon(4px 0, calc(100% - 4px) 0, calc(100% - 4px) 4px, 100% 4px, 100% calc(100% - 4px), calc(100% - 4px) calc(100% - 4px), calc(100% - 4px) 100%, 4px 100%, 4px calc(100% - 4px), 0 calc(100% - 4px), 0 4px, 4px 4px); }
+.pixel-context-menu__columns { display: flex; gap: 4px; width: max-content; }
+.pixel-context-menu__column { flex: none; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
 .pixel-context-menu__caption { padding: 8px 12px; color: var(--pixel-muted); border-bottom: 1px solid var(--pixel-line); }
-.pixel-context-menu__item { position: relative; display: flex; align-items: flex-start; flex-direction: column; gap: 0; width: 100%; padding: 8px 32px 8px 12px; text-align: left; border: 0; background: transparent; }
+.pixel-context-menu__item { position: relative; display: flex; align-items: flex-start; flex-direction: column; gap: 0; width: 100%; min-width: 0; padding: 8px 32px 8px 12px; text-align: left; overflow-wrap: anywhere; border: 0; background: transparent; }
 .pixel-context-menu__item > .pixel-icon { position: absolute; right: 8px; top: 10px; color: #a7b4d0; }
 .pixel-context-menu__item:hover, .pixel-context-menu__item:focus-visible { background: var(--pixel-pink-soft); outline: none; box-shadow: inset 2px 0 0 var(--pixel-pink); }
 .pixel-context-menu__item:hover > .pixel-icon, .pixel-context-menu__item:focus-visible > .pixel-icon { color: var(--pixel-pink); }

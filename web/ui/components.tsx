@@ -15,6 +15,7 @@ import {
   type TextareaHTMLAttributes,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { layoutMenuColumns, nextMenuIndex, type MenuViewport } from './menu-layout.js';
 
 function classes(...values: (string | undefined | false)[]): string {
   return values.filter(Boolean).join(' ');
@@ -187,63 +188,98 @@ export interface PixelContextMenuProps {
 
 export function PixelContextMenu({ x, y, items, onClose }: PixelContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const [position, setPosition] = useState({ x, y });
+  const readViewport = (): MenuViewport => ({ width: window.visualViewport?.width ?? window.innerWidth, height: window.visualViewport?.height ?? window.innerHeight,
+    left: window.visualViewport?.offsetLeft ?? 0, top: window.visualViewport?.offsetTop ?? 0 });
+  const [viewport, setViewport] = useState(readViewport);
+  const measured = useRef(items.map(item => ({ height: item.description ? 52 : 36, disabled: item.disabled === true })));
+  const [layout, setLayout] = useState(() => layoutMenuColumns(measured.current, viewport, { x, y }));
   const originalFocus = useRef<HTMLElement | null>(null);
+  const focusedId = useRef<string | undefined>(undefined);
+  const focusedIndex = useRef(0);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
   useLayoutEffect(() => {
+    originalFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }, []);
+
+  useLayoutEffect(() => {
     const menu = ref.current;
     if (!menu) return;
-    const rect = menu.getBoundingClientRect();
-    setPosition({ x: Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)), y: Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) });
-  }, [x, y, items]);
+    let frame: number | undefined;
+    const measure = () => {
+      const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+      measured.current = items.map((item, index) => ({ height: buttons[index]?.getBoundingClientRect().height ?? 36, disabled: item.disabled === true }));
+      const next = layoutMenuColumns(measured.current, viewport, { x, y });
+      setLayout(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
+    };
+    const schedule = () => { if (frame === undefined) frame = window.requestAnimationFrame(() => { frame = undefined; measure(); }); };
+    measure();
+    const observer = new ResizeObserver(schedule);
+    for (const item of menu.querySelectorAll('[role="menuitem"]')) observer.observe(item);
+    return () => { observer.disconnect(); if (frame !== undefined) window.cancelAnimationFrame(frame); };
+  }, [x, y, items, viewport, layout]);
+
+  useLayoutEffect(() => {
+    const buttons = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+    let index = items.findIndex(item => item.id === focusedId.current && !item.disabled);
+    if (index < 0) index = items.findIndex((item, candidate) => candidate >= focusedIndex.current && !item.disabled);
+    if (index < 0) { for (let candidate = items.length - 1; candidate >= 0; candidate--) if (!items[candidate]!.disabled) { index = candidate; break; } }
+    const button = buttons[index];
+    if (button) {
+      focusedId.current = items[index]!.id; focusedIndex.current = index;
+      button.focus({ preventScroll: true }); button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } else ref.current?.focus({ preventScroll: true });
+  }, [layout, items]);
 
   useEffect(() => {
-    originalFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const menu = ref.current;
-    const first = menu?.querySelector<HTMLButtonElement>('button:not(:disabled)');
-    (first ?? menu)?.focus();
     const outside = (event: PointerEvent) => {
       if (event.target instanceof Node && !ref.current?.contains(event.target)) closeRef.current();
     };
     const dismiss = (event: Event) => { if (!(event.target instanceof Node) || !ref.current?.contains(event.target)) closeRef.current(); };
+    const resize = () => setViewport(readViewport());
     document.addEventListener('pointerdown', outside, true);
-    window.addEventListener('resize', dismiss);
+    window.addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('scroll', resize);
     window.addEventListener('scroll', dismiss, true);
     return () => {
       document.removeEventListener('pointerdown', outside, true);
-      window.removeEventListener('resize', dismiss);
+      window.removeEventListener('resize', resize);
+      window.visualViewport?.removeEventListener('resize', resize);
+      window.visualViewport?.removeEventListener('scroll', resize);
       window.removeEventListener('scroll', dismiss, true);
-      if (document.activeElement === document.body || ref.current?.contains(document.activeElement)) originalFocus.current?.focus();
+      if ((document.activeElement === document.body || ref.current?.contains(document.activeElement)) && originalFocus.current?.isConnected) originalFocus.current.focus();
     };
   }, []);
 
   if (typeof document === 'undefined') return null;
-  return createPortal(<div ref={ref} data-pixel-context-menu="" className="pixel-context-menu" role="menu" aria-label="对象命令" tabIndex={-1} style={{ left: position.x, top: position.y }} onContextMenu={event => event.preventDefault()} onKeyDown={event => {
+  return createPortal(<div ref={ref} data-pixel-context-menu="" className="pixel-context-menu" role="menu" aria-label="对象命令" tabIndex={-1} style={{ left: layout.x, top: layout.y, width: layout.width, height: layout.height }} onContextMenu={event => event.preventDefault()} onKeyDown={event => {
     if (event.key === 'Escape' || event.key === 'Tab') {
       event.stopPropagation();
       event.preventDefault();
       onClose();
       return;
     }
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
-      event.preventDefault();
-      const options = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
-      if (!options.length) return;
+    if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      const options = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
       const active = options.indexOf(document.activeElement as HTMLButtonElement);
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (active + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
-      options[next]?.focus();
+      const next = nextMenuIndex(measured.current, layout.columns, active, event.key);
+      if (next !== undefined) { options[next]?.focus({ preventScroll: true }); options[next]?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
     }
   }}>
-    
-    {items.map(item => <button key={item.id} type="button" role="menuitem" aria-label={item.label} className="pixel-context-menu__item" disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>
+    <div className="pixel-context-menu__columns" style={{ height: layout.bodyHeight }}>
+    {layout.columns.map((column, columnIndex) => <div key={columnIndex} className="pixel-context-menu__column" role="presentation" data-pixel-menu-column={columnIndex} style={{ width: layout.columnWidth, height: layout.bodyHeight }}>
+    {column.map(index => { const item = items[index]; if (!item) return null; return <button key={item.id} data-pixel-menu-id={item.id} type="button" role="menuitem" aria-label={item.label} tabIndex={-1} className="pixel-context-menu__item" disabled={item.disabled}
+      onFocus={() => { focusedId.current = item.id; focusedIndex.current = index; }} onClick={() => { onClose(); item.onSelect(); }}>
       <span className="pixel-context-menu__label">{item.label}</span>
       {item.description && <span className="pixel-description">{item.description}</span>}
       <PixelIcon name="chevron" />
-    </button>)}
+    </button>; })}
     {items.length === 0 && <p className="pixel-context-menu__empty pixel-description">当前对象没有可用命令</p>}
-    
+    </div>)}
+    </div>
   </div>, document.body);
 }
 

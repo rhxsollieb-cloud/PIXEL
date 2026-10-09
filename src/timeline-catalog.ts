@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { DeepReadonly, JsonObject, JsonValue, MediaKind, ReadonlyJsonObject, TimelineData } from './contracts.js';
+import type { DeepReadonly, JsonObject, JsonValue, MediaKind, TimelineData } from './contracts.js';
 import { ModelRegistry, modelRegistry, type ModelDeclaration } from './models.js';
 import { LocalMediaTimelinePlugin, TextTimelinePlugin, type PluginFieldDeclaration, type TimelinePlugin } from './plugins.js';
 import { DomainError } from './backend.js';
@@ -17,6 +17,7 @@ export interface TimelineDeclaration {
   capabilities: { generation: boolean; mediaPlacement: boolean; references: boolean };
   supportedActions: string[];
   referenceTextFields: string[];
+  requiredTextFields?: readonly string[];
   overlapPolicy: 'allow' | 'reject';
   fields: PluginFieldDeclaration[];
   defaultFields: PluginFieldDeclaration[];
@@ -35,7 +36,8 @@ export interface TimelineDeclaration {
   contextMaxCharacters?: number;
   referenceKinds: MediaKind[];
   maxReferences: number;
-  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number }[];
+  referenceMaxBytes?: number;
+  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number; minimum?: number }[];
   referenceLimitSource?: ModelDeclaration['referenceLimitSource'];
 }
 
@@ -51,11 +53,7 @@ export const timelineTypeQuerySchema = z.strictObject({
 export type TimelineTypeQuery = z.infer<typeof timelineTypeQuerySchema>;
 export interface TimelineTypePage { items: TimelineDeclaration[]; nextCursor?: string; }
 
-/** 同一声明供 GUI 预览与权威 Action 使用，供应商最终输入校验仍在模型层。 */
-export function referenceLimit(declaration: Pick<TimelineDeclaration, 'maxReferences' | 'referenceLimits'>, params: ReadonlyJsonObject): number {
-  return (declaration.referenceLimits ?? []).reduce((maximum, rule) =>
-    JSON.stringify(params[rule.field]) === JSON.stringify(rule.equals) ? Math.min(maximum, rule.maximum) : maximum, declaration.maxReferences);
-}
+export { referenceLimit, referenceMinimum } from './reference-policy.js';
 
 export class TimelineRegistry {
   private readonly local = new Map<string, TimelinePlugin>();

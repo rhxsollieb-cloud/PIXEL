@@ -9,6 +9,8 @@ import { createWorkbench, type Workbench, type WorkbenchOptions } from './workbe
 import { loadBackendConfiguration } from './backend-configuration.js';
 import { queryTimelineText, formatTimelineText } from './timeline-text.js';
 import { timelineRegistry } from './timeline-catalog.js';
+import { VoiceService, VoiceServiceError } from './voices.js';
+import { ElevenLabsVoiceProvider } from './providers/elevenlabs-voices.js';
 export { preparePixelProjectLocation } from './project-files.js';
 
 export interface ApiOptions {
@@ -163,6 +165,16 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
         response.end(formatTimelineText(page)); return;
       }
       if (request.method === 'GET' && url.pathname === '/api/jobs') { json(response, 200, await workbench.jobs()); return; }
+      if (request.method === 'GET' && url.pathname === '/api/voices') {
+        const query = url.searchParams;
+        if ([...query.keys()].some(key => !['category', 'limit', 'cursor', 'search'].includes(key))) throw new DomainError('INVALID_INPUT', '声音查询包含未知字段');
+        const category = query.get('category') ?? 'default';
+        if (!['default', 'cloned'].includes(category)) throw new DomainError('INVALID_INPUT', '声音分类无效');
+        json(response, 200, await workbench.queryVoices({ category: category as 'default' | 'cloned',
+          ...(query.has('limit') ? { limit: queryInteger(query.get('limit')!, 'limit') } : {}),
+          ...Object.fromEntries(['cursor', 'search'].filter(key => query.has(key)).map(key => [key, query.get(key)!])),
+        })); return;
+      }
       if (request.method === 'GET' && url.pathname === '/api/status') { json(response, 200, { providers: workbench.providers }); return; }
       if (request.method === 'GET' && url.pathname === '/api/events') {
         response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -207,6 +219,25 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
         json(response, 200, await workbench.placeExternalMedia({ bytes: await bytes(request, 256 * 1024 * 1024), mimeType, name, requestId, expectedRevision, startTick,
           ...(timelineId === undefined ? {} : { timelineId }) })); return;
       }
+      if (request.method === 'POST' && ['/api/media-reference', '/api/voice-clone'].includes(url.pathname)) {
+        if (scalarHeader(request, 'x-pixel-project-id') !== workbench.projectId) throw new DomainError('FORBIDDEN', '上传不属于当前项目');
+        const mimeType = scalarHeader(request, 'content-type').split(';')[0]!.trim().toLowerCase();
+        const requestId = scalarHeader(request, 'x-pixel-request-id');
+        const expectedRevision = queryInteger(scalarHeader(request, 'x-pixel-revision'), '项目版本');
+        let name: string;
+        try { name = decodeURIComponent(scalarHeader(request, 'x-pixel-name')); }
+        catch { throw new DomainError('INVALID_INPUT', '文件名编码无效'); }
+        if (url.pathname === '/api/media-reference') {
+          const itemId = scalarHeader(request, 'x-pixel-item-id');
+          json(response, 200, await workbench.importReferenceMedia({ bytes: await bytes(request, 256 * 1024 * 1024), mimeType, name, requestId, expectedRevision, itemId })); return;
+        }
+        const timelineId = scalarHeader(request, 'x-pixel-timeline-id');
+        let voiceName: string;
+        try { voiceName = decodeURIComponent(scalarHeader(request, 'x-pixel-voice-name')); }
+        catch { throw new DomainError('INVALID_INPUT', '声音名称编码无效'); }
+        json(response, 200, await workbench.cloneVoice({ bytes: await bytes(request, 25 * 1024 * 1024), mimeType, fileName: name, name: voiceName,
+          requestId, expectedRevision, timelineId, projectId: workbench.projectId })); return;
+      }
       if ((request.method === 'GET' || request.method === 'HEAD') && /^\/api\/media\/[^/]+$/.test(url.pathname)) {
         const id = decodeURIComponent(url.pathname.slice('/api/media/'.length));
         const asset = await workbench.mediaAsset(id);
@@ -231,7 +262,7 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
     })().catch(error => {
       if (response.headersSent) { response.destroy(); return; }
       json(response, error instanceof DomainError && error.code === 'NOT_FOUND' ? 404 : 400, {
-        ok: false, error: error instanceof DomainError ? { code: error.code, message: error.message } : { code: 'INTERNAL', message: '本地宿主处理失败' },
+        ok: false, error: error instanceof DomainError || error instanceof VoiceServiceError ? { code: error.code, message: error.message } : { code: 'INTERNAL', message: '本地宿主处理失败' },
       });
     });
   });
@@ -248,15 +279,17 @@ export async function startWorkbenchServer(options: WorkbenchOptions & ApiOption
   const directory = resolve(options.directory ?? process.env.PIXEL_STORAGE_DIR ?? '.pixel');
   let runner = options.runner;
   let providers = options.providers;
+  let voices = options.voices;
   if (!runner && !providers) {
     try {
       const configuration = await loadBackendConfiguration({ storageDirectory: directory, ...(options.envPath ? { envPath: options.envPath } : {}) });
       const { createModelBackend } = await import('./runtime.js');
       runner = createModelBackend(configuration);
       providers = { elevenlabs: true, openrouter: true };
+      voices ??= new VoiceService(new ElevenLabsVoiceProvider({ apiKey: configuration.elevenlabsApiKey }), resolve(directory, 'voice-operations'));
     } catch { providers = { elevenlabs: false, openrouter: false }; }
   }
-  const workbench = await createWorkbench({ ...options, directory, ...(runner ? { runner } : {}), ...(providers ? { providers } : {}) });
+  const workbench = await createWorkbench({ ...options, directory, ...(runner ? { runner } : {}), ...(providers ? { providers } : {}), ...(voices ? { voices } : {}) });
   const apiPort = options.apiPort ?? port(process.env.PIXEL_API_PORT, 4311);
   const frontendPort = options.frontendPort ?? port(process.env.PIXEL_PORT, 4310);
   const server = createApiServer(workbench, { ...options, apiPort, frontendPort });

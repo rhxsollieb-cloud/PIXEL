@@ -1,0 +1,7 @@
+.composition-preview{width:100%;height:100%;min-height:0;position:relative;align-self:stretch;flex:1;overflow:hidden;background:var(--pixel-surface-muted)}
+.composition-player{font-family:inherit;font-size:var(--pixel-font-size,12px);line-height:1.5;border-radius:0}
+.composition-player div{font-family:inherit!important;font-size:12px!important}
+.composition-player button,.composition-player input{font:inherit;border-radius:0}
+.composition-picture{background:transparent;overflow:hidden}
+.composition-media{width:100%;height:100%;object-fit:contain;background:transparent}
+.composition-error{padding:16px;color:var(--pixel-red)}

@@ -2,7 +2,7 @@
 
 更新日期：2026-10-09。产品与交互规则沿用[设计哲学](design-philosophy.zh-CN.md)；项目、Action 与任务的完整边界见[核心架构](core-architecture.zh-CN.md)。
 
-当前已实现后端的官方 SDK 适配器、共享模型语义目录、文件任务 ledger、媒体产物存储和诊断 CLI；Electron / React 工作台及 `generation.submit` 的项目事务/outbox、内部 `generation.applyResult` 的受控挂载也已由 `src/workbench.ts` 组合完成。验证使用真实 SDK 配合模拟 HTTP 响应，未发起付费生成请求。正式项目 CLI / Agent 和共享 Action 能力查询仍待接线；诊断 CLI 生成文件成功不代表 GUI 项目已关联输出。
+当前已实现后端的官方 SDK 适配器、共享模型语义目录、文件任务 ledger、媒体产物存储和诊断 CLI；Electron / React 工作台及 `generation.submit` 的项目事务/outbox、内部 `generation.apply` 的受控挂载也已由 `src/workbench.ts` 组合完成。声纹目录与克隆经共享 `VoiceService` 执行，使用独立账号资源 ledger。验证使用真实 SDK 配合模拟 HTTP 响应，未发起真实克隆或计费生成请求。1.6 的可见输入控件、引用政策、分组及预览边界见[声音、输入、分组与多轨预览](voices-inputs-groups-and-composition.zh-CN.md)。正式项目 CLI / Agent 和共享 Action 能力查询仍待接线；诊断 CLI 生成文件成功不代表 GUI 项目已关联输出。
 
 ## 1. 模型、标识与输出
 
@@ -50,13 +50,31 @@ Wan 公开 480p / 720p / 1080p，支持当前目录声明的五种宽高比；Gr
 
 `GenerationRequest.settings` 捕获 Item 的生成设置快照（旧 Item 回退其 Timeline 设置）；`durationMs` 表达模型生成时长，不能自动等同于 Item 在作品中的播放区间。SFX / music prompt 未设时长但提供 `durationMs` 时，将其规范成该模型的秒 / 毫秒参数；同时提供的两种表示必须一致。自然语音时长与静态图像保持独立语义。`PluginFieldDeclaration` 的 `object` / `array`、`children`、`visibleWhen` 与 `nullable` 让宿主逐层显示复杂字段，不要求插件自行增加界面。
 
+### Eleven v4 的声音选择与克隆
+
+Timeline 左侧单击进入 Eleven v4 默认配置详情，直接显示声音来源、声音选择、克隆音频文件选择、声纹名称及“克隆声纹”按钮。默认声音、自己的克隆和手填声音 ID 增强同一个字符串 `voiceId` 字段；选择默认音色并不生成声音，切换来源也不清空当前 ID。列表未找到原 ID 时保留该值，不自动改为第一项。选用声纹经原 `timeline.defaults` 或 `item.params` Action；克隆完成只刷新账号目录并显示结果 ID，不自动选择，也不修改默认配置或已有片段。
+
+`ElevenLabsVoiceProvider` 使用官方 `voices.search()`，默认声音按 `voiceType: 'default'` 查询，自己的克隆按 `voiceType: 'personal'` 查询并保留 IVC / PVC、筛除声音设计及明确非本人资源；不使用已弃用的无分页 `getAll()`。`VoiceService.query()` 默认每页 5 项、最多 20 项，当前 GUI 显式请求每页 20 项并提供搜索与“更多声音”。宿主 cursor 绑定凭证作用域、分类和搜索；供应商首屏多返回的声音会保存为后续页，过滤后的空页仍保留下一页入口，不能切片后丢失声音。[官方声音查询](https://elevenlabs.io/docs/api-reference/voices/search)。
+
+列表将供应商明确的验证及准备状态规范为 `ready`、`verificationRequired` 或 `unavailable`；后两类在声音选择中禁用并显示状态 / 原因，原有 ID 仍保留。缺少验证字段不等于不可用。创建使用 `voices.ivc.create()`，即 Instant Voice Cloning；返回的 `voiceId` 和 `requiresVerification` 会持久化，待验证时保留 ID，提示到 ElevenLabs 完成验证。当前官方 IVC SDK 没有供本实现自动完成验证的端点，不能把 PVC 的 captcha / verification 接口混用于 IVC。[官方 IVC 创建接口](https://elevenlabs.io/docs/api-reference/voices/ivc/create)。
+
+上传限定一个 MP3 或 WAV 文件、非空且不超过 25 MiB；这是 Pixel 的宿主上限，不声称供应商有相同限额。工作台校验当前项目、支持声纹的目标和 revision，按真实字节识别类型并实际探测音频，再调用服务。文件名只作为 multipart 上传名，供应商不能通过前端路径读取本机文件；本地项目不保存克隆音频样本、密钥或供应商完整账号资料。
+
+标准命令 `voice.clone` 创建账号资源，不伪造 Asset、GenerationJob 或项目编辑。`VoiceService` 在上游 POST 前先持久化 attempt；requestId 绑定项目、目标、原 revision、名称、格式、文件名、完整字节哈希及 API key 的凭证作用域哈希。成功回执可重放，重复编号但内容改变会拒绝。凭证哈希不是供应商永久账号 ID，改换密钥后不能复用旧作用域的回执。已尝试而结果未知、超时、断线或重启后的命令不重复 POST，应先刷新自己的声纹或在 ElevenLabs 核对。没有供应商幂等承诺可以代替这个守卫，SDK 写请求禁用自动重试。
+
+`shutdown()` 同步关闭入口并取消本地等待，随后等待查询、克隆结算及回执写入完成；晚到成功不覆盖已经关闭窗口的意图。关闭不能证明远端没有创建声纹，保存成功回执的结果仍可在下一次会话读取。权限、套餐或限流错误返回脱敏原因；模拟测试不能证明真实账号的克隆资格、名额或语音生成权限。
+
 ## 3. 引用、异步任务与恢复
+
+Wan / Grok 的 `referenceMaxBytes` 声明当前宿主的单图上限 25 MiB，与 `MAX_IMAGE_REFERENCE_BYTES` 和 SDK 输入转换守卫共用一个来源。界面显示此值并在发送前拒绝超限文件；文件上传保存前、已有素材关联及生成捕获均重新检查实际字节或已知大小。旧素材缺少 `metadata.byteLength` 时由 SDK 的受控读取最终检查，不能把 HTTP 通用 256 MiB 上传上限当成模型支持上限，也不声称这是供应商承诺的同一限额。
 
 请求中的引用保存受控 Asset 记录，可声明 `reference`、`first-frame` 或 `last-frame` 角色。媒体读取由宿主 `MediaReader` 解析 `fileRef`；供应商只接收读取结果，不把资产 metadata 中的任意 URL 当成真实文件。
 
-当前三个 ElevenLabs 端点不接收 Asset 引用；Wan 与 Grok 只接收图片。Grok 最多三张参考图。Wan 的普通参考模式采用宿主上限三张，该上限在 descriptor 中明确标为 `host`；首帧模式必须恰好一张图，当前不支持末帧。不会因接口宽泛就静默忽略输入类型或角色。[Grok 模型引用限制](https://openrouter.ai/x-ai/grok-imagine-image-2.0)、[OpenRouter 视频引用协议](https://openrouter.ai/docs/guides/overview/multimodal/video-generation)。
+当前三个 ElevenLabs 生成端点不接收 Asset 媒体引用，声音克隆的账号资源上传另属前节边界；Wan 与 Grok 只接收图片。Grok 最多三张参考图。Wan 的普通参考模式采用宿主上限三张，该上限在 descriptor 中明确标为 `host`；首帧模式 minimum / maximum 均为 1，生成必须恰好一张图，当前不支持末帧。共享 [reference-policy.ts](../src/reference-policy.ts) 的 `referenceMinimum()` / `referenceLimit()` 被目录、GUI 能力提示、关系提交和生成规范化共同消费；不能各自复制数量规则。不会因接口宽泛就静默忽略输入类型或角色。[Grok 模型引用限制](https://openrouter.ai/x-ai/grok-imagine-image-2.0)、[OpenRouter 视频引用协议](https://openrouter.ai/docs/guides/overview/multimodal/video-generation)。
 
-GUI 不为三个音频模型显示不适用的引用管理。支持引用的 Item 只在已有关系或合法素材拖拽上下文中显示引用区域；hover/drop 会检查类型、重复关系与当前模式上限，Wan 首帧模式在第二张图片提交前即拒绝。后端在 Action 执行与生成请求规范化时继续校验，前端提示不替代最终业务检查。
+1.6 按用户要求在模型详情直接说明媒体输入能力：支持参考的 Item 显示当前格式、已用数量、最小 / 最大数量和可见文件上传入口；Timeline 默认详情只显示能力说明，引用仍属于具体 Item。三个音频生成模型显示简短的不支持媒体参考说明，不出现无效上传入口，不把“有声音克隆”解释成“语音生成支持音频参考”。Wan 首帧模式缺图时提示必需一张，第二张图在提交前即拒绝；后端在 Action 与生成规范化时继续校验，前端提示不替代业务检查。
+
+原始 PNG / JPEG / WebP 文件从 Item 详情上传，经宿主验证和 `media.referenceExternal` 原子 Action 一次登记项目素材并建立引用。已有库 Asset 拖入 Item 引用区经 `item.reference.add` 只建立关系，拥有不同的前置对象和业务结果；库导入则只创建可复用 Asset。三者不通过菜单询问“导入、引用或替换”，也不把上传控件复制为已有 Asset 的第二条 GUI 入口。引用区仍接受合法素材拖拽，hover/drop 检查类型、重复关系和当前模式上限。
 
 `BaseModelProvider.generate()` 是公共执行模板：严格解析请求、调用统一模型规范化、检查 provider / 适配器版本、设置覆盖请求及流读取的总超时、转发取消、校验产物的 job / attempt 归属，并脱敏供应商错误。扩展点是受保护的 `performGeneration()`。SDK 的生成请求禁用自动重试，避免一次本地失败悄悄产生第二次生成。
 
@@ -106,8 +124,8 @@ npm run generate -- --resume JOB_ID
 
 ## 5. 设计哲学评审与当前证据
 
-对应设计哲学第 10 节，模型能力作用于 Timeline 默认配置、Item 生成请求、任务与产物。标准 GUI 路径为 Timeline 左侧单击配置、左侧右键刷新默认配置、工作区空白处右键创建模型时间线、已有时间位置右键创建生成草稿、Item 双击编辑与右键生成。已有素材经 Asset → Timeline 放置。默认仍只显示 Viewer + Timeline，素材库唯一入口仍为主 Viewer 右键；并行窗口及局部详情隔离保持 1.3 语义。新增字段只扩展语义，由宿主决定控件和导航，无模型拖拽、常驻按钮或插件 Modal。旧片段保留原值、设置快照和明确刷新规则，连同本轮评审，见[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)；此前窗口纠偏证据作为历史保留在[哲学对齐记录](philosophy-alignment.zh-CN.md)。
+对应设计哲学第 10 节，模型能力作用于 Timeline 默认配置、Item 生成请求、任务、产物和独立账号声纹资源。标准 GUI 路径为 Timeline 左侧单击配置、左侧右键刷新默认配置、工作区空白处右键创建模型时间线、已有时间位置右键创建生成草稿、Item 双击编辑与右键生成。1.6 在相关详情中可见声音选择 / 克隆和原始参考文件上传控件，使用同一宿主及共享服务，不新增插件 Modal 或主工作区常驻工具。已有 Asset 拖拽仍只建立已有对象关系；原始文件上传登记素材并引用，前置对象和结果不同。默认仍只显示 Viewer + Timeline，素材库唯一入口仍为主 Viewer 右键；并行窗口及局部详情隔离保持 1.3 语义。旧片段保留原值、设置快照和明确刷新规则；本轮基线与评审见[声音、输入、分组与多轨预览](voices-inputs-groups-and-composition.zh-CN.md)，此前记录保留在[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)和[哲学对齐记录](philosophy-alignment.zh-CN.md)。
 
-`ModelRegistry` 与 `BaseModelProvider` 集中校验，正式项目 CLI / Agent 接线时也应复用，避免各自复制供应商规则。项目权威状态边界不变，任务 ledger 与产物存储独立于编辑历史，runner 不直接写项目。attempt、保存远端 ID 与总超时保护中断执行；工作台已在 `generation.applyResult` 事务内执行旧结果、含 context 的请求指纹及产物归属检查。音频后处理组合到现有 provider 流程，继承同一取消与总超时。当前基线及调整依据以设计哲学 1.4 为准；旧 Item 缺失的设置快照惰性兼容，无需清空项目，没有发起付费生成。
+`ModelRegistry`、共享引用政策与 `BaseModelProvider` 集中校验，正式项目 CLI / Agent 接线时也应复用，避免各自复制供应商规则。项目权威状态边界不变，生成任务 ledger 与产物存储独立于编辑历史，runner 不直接写项目；声纹 ledger 是另一类账号资源记录，不混入生成任务或项目修订。attempt、保存远端 ID 与总超时保护中断执行；工作台已在 `generation.apply` 事务内执行旧结果、含 context 的请求指纹及产物归属检查。音频后处理组合到现有 provider 流程，继承同一取消与总超时。当前基线及调整依据以设计哲学 1.6 为准；旧 Item 缺失的设置快照惰性兼容，无需清空项目，没有调用真实计费服务。
 
-相关自动验证覆盖 schema 默认值与未知字段、模型别名、图像 / 音频 / 视频参数隔离、真实 SDK 编码、禁用自动重试、checkpoint 顺序与远端恢复、引用限制、取消、超时、异常产物和脱敏错误。测试使用模拟响应，不能证明账户权限、余额或供应商实际生成质量；付费端到端验证按明确请求另行执行。
+相关自动验证覆盖 schema 默认值与未知字段、模型别名、图像 / 音频 / 视频参数隔离、真实 SDK 编码、禁用自动重试、checkpoint 顺序与远端恢复、引用最小 / 最大边界、声纹分页溢出、回执重放与未知结果、取消、超时、异常产物和脱敏错误。测试使用模拟响应，不能证明账号权限、余额、声纹身份验证结果或供应商实际生成质量；真实端到端验证按明确请求另行执行。

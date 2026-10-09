@@ -1,6 +1,7 @@
 import type { DeepReadonly, GenerationJob, JsonObject, ProjectSnapshot, TimelineData } from '../src/contracts.js';
 import { ContextActionRegistry, DragRegistry, GuiActionPathRegistry, ModalNavigator, type ContextActionContext } from '../src/frontend.js';
 import { referenceLimit, type TimelineDeclaration } from '../src/timeline-catalog.js';
+import { referenceExceedsByteLimit } from '../src/reference-policy.js';
 
 /** A local timeline has no provider model ID; both kinds use one semantic catalog. */
 export function declarationForTimeline(declarations: readonly TimelineDeclaration[], timeline: DeepReadonly<TimelineData> | undefined): TimelineDeclaration | undefined {
@@ -89,6 +90,7 @@ export function createInteractionHost(projectId: string, getTypes: () => readonl
       const itemId = 'id' in target.object ? target.object.id : '';
       const item = project.document.items[itemId]; const asset = project.document.assets[source.payload.object.id]; const model=modelFor(project,itemId);
       if (!model?.capabilities.references || !asset || model.maxReferences < 1 || !model.referenceKinds.includes(asset.kind)) return {status:'disabled',reason:'该时间线不支持这种参考素材'};
+      if (referenceExceedsByteLimit(model,asset.metadata.byteLength)) return {status:'disabled',reason:`参考文件单个最多 ${model.referenceMaxBytes!/1024/1024} MiB`};
       if (item?.referenceAssetIds.includes(asset.id)) return {status:'disabled',reason:'素材已被引用'};
       const maximum = referenceLimit(model, item?.params ?? {});
       if ((item?.referenceAssetIds.length ?? 0) >= maximum) return {status:'disabled',reason:'参考素材数量已达上限'};
@@ -114,6 +116,6 @@ export function createInteractionHost(projectId: string, getTypes: () => readonl
   drag.register({sourceRole:'external.media',targetRole:'asset-library',actionType:'asset.import',
     preview:()=>({status:'available'}),buildPayload:()=>({}),
   });
-  for(const [action,path] of [['item.params','field:item'],['timeline.settings','field:timeline'],['timeline.defaults','field:timeline-defaults'],['project.title','field:project'],['project.open','drag:external-project->workspace']]) paths.claim(action!,path!);
+  for(const [action,path] of [['item.params','field:item'],['timeline.settings','field:timeline'],['timeline.defaults','field:timeline-defaults'],['project.title','field:project'],['project.open','drag:external-project->workspace'],['voice.clone','detail:timeline-voice-clone'],['media.referenceExternal','detail:item-reference-upload'],['timeline.reorder','drag:timeline.sort'],['assetGroup.create','detail:library-group-create'],['assetGroup.rename','detail:library-group-rename'],['assetGroup.remove','detail:library-group-remove'],['assetGroup.moveAsset','field:asset-group']]) paths.claim(action!,path!);
   return {navigator,paths,menu,drag};
 }

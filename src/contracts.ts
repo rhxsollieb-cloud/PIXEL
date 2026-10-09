@@ -22,6 +22,23 @@ export interface AssetData {
   metadata: JsonObject;
 }
 
+/** Asset remains the media object; a group only records one project-local library membership. */
+export interface AssetGroupData {
+  id: string;
+  title: string;
+  assetIds: string[];
+}
+
+export const assetGroupTitleSchema = z.string().trim().min(1).max(80);
+export const assetGroupDataSchema = z.strictObject({
+  id: z.string().min(1).max(200),
+  // Stored data is canonical; Action inputs use assetGroupTitleSchema to trim before committing.
+  title: z.string().refine(title => title === title.trim() && assetGroupTitleSchema.safeParse(title).success, '分组名称必须为已去除首尾空白的 1–80 字符文本'),
+  assetIds: z.array(z.string().min(1).max(200)),
+});
+export const assetGroupsSchema = z.record(z.string().min(1).max(200), assetGroupDataSchema);
+export const timelineOrderSchema = z.array(z.string().min(1).max(200));
+
 export interface TimelineData {
   id: string;
   pluginId: string;
@@ -62,6 +79,15 @@ export interface ProjectDocument {
   timelines: Record<string, TimelineData>;
   items: Record<string, TimelineItemData>;
   assets: Record<string, AssetData>;
+  /** Missing in older version-1 projects; no automatic grouping or migration is needed. */
+  assetGroups?: Record<string, AssetGroupData>;
+  /** Top-to-bottom layer order. Missing in older projects, which retain dictionary insertion order. */
+  timelineOrder?: string[];
+}
+
+/** Read-only presentation order; querying an old project never migrates or rewrites it. */
+export function orderedTimelineIds(document: Pick<DeepReadonly<ProjectDocument>, 'timelines' | 'timelineOrder'>): string[] {
+  return document.timelineOrder ? [...document.timelineOrder] : Object.keys(document.timelines);
 }
 
 export interface ProjectSnapshot {

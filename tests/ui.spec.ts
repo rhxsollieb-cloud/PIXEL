@@ -1,6 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
 import { resolve } from 'node:path';
-import type { ActionEnvelope, ProjectSnapshot } from '../src/contracts.js';
+import type { ActionEnvelope, ActionResult, JsonObject, ProjectSnapshot } from '../src/contracts.js';
+
+/** 声音目录与克隆全部使用测试响应，不读取或修改真实供应商账户。 */
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/voices?*', route => route.fulfill({ json: { items: [{voiceId:'default-voice',name:'默认测试声音',category:'default',status:'ready'}] } }));
+  await page.route('**/api/voice-clone', route => route.fulfill({ status:400, json: {ok:false,error:{code:'NOT_APPLICABLE',message:'浏览器验证已阻止真实声纹克隆'}} }));
+});
 
 /** 每个测试都阻断生成命令，浏览器验证不会产生供应商调用或费用。 */
 async function openWorkbench(page: Page): Promise<void> {
@@ -33,7 +39,8 @@ test('默认工作区只呈现 Viewer 与 Timeline，不提前披露素材库或
   await expect(page.getByTestId('viewer')).toBeVisible();
   await expect(page.getByTestId('asset-library')).toHaveCount(0);
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByRole('button')).toHaveCount(0);
+  await expect(page.getByRole('button')).toHaveCount(3);
+  await expect(page.getByTestId('timeline-sort-handle')).toHaveCount(3);
   await expect(page.getByText('暂无输出', { exact: true })).toBeVisible();
   await expect(page.locator('.idle-artwork, .pixel-palette, .gesture-hints, .wordmark-version')).toHaveCount(0);
   await expect(page.getByRole('combobox')).toHaveCount(0);
@@ -102,7 +109,7 @@ async function createTimeline(page: Page, title: string): Promise<void> {
   await expect(page.getByRole('menuitem')).toHaveCount(types.items.length);
   await page.getByRole('menuitem', { name: title, exact: true }).click();
   await expect(page.getByRole('menu')).toHaveCount(0);
-  await expect(page.getByRole('status')).toContainText('已保存');
+  await expect(page.locator('.workspace-feedback')).toContainText('已保存');
 }
 
 async function itemForModel(page: Page, modelId: string): Promise<string> {
@@ -166,7 +173,8 @@ test('编辑经 Action 提交并持久化，Enter 加 blur 只提交一次，Esc
     if (request.url().endsWith('/api/actions')) requests.push(request.postDataJSON() as ActionEnvelope);
   });
   await page.locator(`[data-item-id="${id}"]`).dblclick();
-  await expect(page.getByTestId('item-reference')).toHaveCount(0);
+  await expect(page.getByTestId('item-reference')).toBeVisible();
+  await expect(page.getByRole('button', {name:'上传参考图片',exact:true})).toBeVisible();
   const prompt = page.getByLabel('画面与风格描述', { exact: true });
   const value = '镜头沿晨雾山谷缓慢推进，清晰的像素轮廓';
   await prompt.fill(value);
@@ -246,7 +254,8 @@ test('左侧单击编辑稀疏默认配置，保留原片段，新草稿继承�
   await expect(page.getByRole('dialog', { name: '时间线默认配置', exact: true })).toHaveCount(1);
   await expect(page.locator('#root')).toHaveAttribute('inert', '');
   await expect(page.getByText(/修改只用于新建片段/)).toBeVisible();
-  await expect(page.getByRole('button')).toHaveCount(0);
+  await expect(page.getByRole('button', {name:'克隆声纹',exact:true})).toBeVisible();
+  await page.getByRole('combobox', {name:'声音来源',exact:true}).selectOption('manual');
   const voice = page.getByLabel('声音 ID', { exact: true });
   await voice.fill('next-voice'); await voice.press('Enter');
   await expect.poll(async () => (await snapshot(page)).document.timelines[timeline.id]?.itemDefaults).toEqual({ voiceId: 'next-voice' });
@@ -290,6 +299,7 @@ test('左侧单击编辑稀疏默认配置，保留原片段，新草稿继承�
   await expect(label).toBeVisible();
   await label.focus(); await label.press('Enter');
   await expect(page.getByRole('dialog', { name: '时间线默认配置', exact: true })).toHaveCount(1);
+  await page.getByRole('combobox', {name:'声音来源',exact:true}).selectOption('manual');
   await expect(page.getByLabel('声音 ID', { exact: true })).toHaveValue('next-voice');
   await expect(page.getByRole('combobox', { name: '裁剪尾部', exact: true })).toHaveValue('true');
   await page.keyboard.press('Escape');
@@ -313,6 +323,125 @@ test('左侧单击编辑稀疏默认配置，保留原片段，新草稿继承�
   await expect.poll(async () => (await snapshot(page)).document.items[newId]?.params.previousText).toBe('前一段。');
   await expect.poll(async () => (await snapshot(page)).document.items[newId]?.params.nextText).toBe('后一段。');
   await page.keyboard.press('Escape');
+});
+
+test('可见声纹上传先确认文件名称，单次克隆不改默认；声音字段选择才提交且保留旧片段', async ({page})=>{
+  test.setTimeout(60_000);
+  let cloneCount=0;let finishClone!:()=>void;let cloned=false;
+  const voiceQueries:string[]=[];
+  await page.route('**/api/voices?*',async route=>{
+    const query=new URL(route.request().url()).searchParams;voiceQueries.push(query.toString());
+    expect(query.get('limit')).toBe('20');
+    const category=query.get('category');
+    const items=category==='cloned'?[{voiceId:'pending-voice',name:'待验证声纹',category:'cloned',status:'verificationRequired',reason:'需要完成验证'},
+      {voiceId:'blocked-voice',name:'不可用声纹',category:'cloned',status:'unavailable'},
+      ...(cloned?[{voiceId:'my-new-voice',name:'我的对白',category:'cloned',status:'ready'}]:[])]:
+      [{voiceId:query.has('cursor')?'default-next':'default-voice',name:'默认测试声音',category:'default',status:'ready'}];
+    await route.fulfill({json:{items,...(category==='default'&&!query.has('cursor')?{nextCursor:'test-next'}:{})}});
+  });
+  await page.route('**/api/voice-clone',async route=>{
+    cloneCount++;const headers=route.request().headers();
+    expect(decodeURIComponent(headers['x-pixel-name']!)).toBe('sample.wav');
+    expect(decodeURIComponent(headers['x-pixel-voice-name']!)).toBe('我的对白');
+    expect(headers['content-type']).toBe('audio/wav');
+    await new Promise<void>(resolve=>{finishClone=resolve;});cloned=true;
+    await route.fulfill({json:{requestId:headers['x-pixel-request-id'],voice:{voiceId:'my-new-voice',name:'我的对白',category:'cloned',status:'ready'}}});
+  });
+  await openWorkbench(page);
+  const state=await snapshot(page);const timeline=Object.values(state.document.timelines).find(candidate=>candidate.modelId==='eleven_v4')!;
+  const id=await itemForModel(page,'eleven_v4');const original=(await snapshot(page)).document.items[id]!;
+  const row=page.locator(`[data-testid="timeline-row"][data-timeline-id="${timeline.id}"]`);
+  await row.getByTestId('timeline-label').click();
+  await expect(page.getByTestId('voice-clone')).toBeVisible();
+  await expect(page.getByTestId('input-capabilities')).toContainText('文本描述（必填）');
+  await expect(page.getByTestId('input-capabilities')).toContainText('不接受文件参考');
+  await expect(page.getByRole('button',{name:'上传参考图片',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('combobox',{name:'声音选择',exact:true})).toBeEnabled();
+  const before=await snapshot(page);
+  await page.getByRole('button',{name:'更多声音',exact:true}).click();
+  await expect(page.getByRole('combobox',{name:'声音选择',exact:true})).toContainText('default-next');
+  await page.getByLabel('搜索声音',{exact:true}).fill('对白');
+  await expect.poll(()=>voiceQueries.some(query=>new URLSearchParams(query).get('search')==='对白')).toBe(true);
+  await page.getByRole('combobox',{name:'声音来源',exact:true}).selectOption('cloned');
+  await expect(page.getByRole('combobox',{name:'声音选择',exact:true})).toContainText('pending-voice');
+  await expect(page.locator('option[value="pending-voice"]')).toBeDisabled();
+  await expect(page.locator('option[value="blocked-voice"]')).toBeDisabled();
+  expect(await snapshot(page)).toEqual(before);
+  await page.getByLabel('克隆音频',{exact:true}).setInputFiles({name:'sample.wav',mimeType:'audio/wav',buffer:Buffer.from('local review fixture')});
+  await page.getByLabel('声纹名称',{exact:true}).fill('我的对白');
+  expect(cloneCount).toBe(0);
+  const clone=page.getByRole('button',{name:'克隆声纹',exact:true});
+  await clone.click();await expect(clone).toBeDisabled();
+  await clone.dispatchEvent('click');expect(cloneCount).toBe(1);
+  await expect(page.getByTestId('voice-clone')).toContainText('正在克隆声纹');
+  finishClone();
+  await expect(page.getByTestId('voice-clone')).toContainText('声音 ID：my-new-voice');
+  await expect(page.getByRole('combobox',{name:'声音选择',exact:true})).toContainText('my-new-voice');
+  expect(await snapshot(page)).toEqual(before);
+  await page.getByRole('combobox',{name:'声音选择',exact:true}).selectOption('my-new-voice');
+  await expect.poll(async()=>(await snapshot(page)).document.timelines[timeline.id]?.itemDefaults?.voiceId).toBe('my-new-voice');
+  expect((await snapshot(page)).document.items[id]).toEqual(original);
+  await page.keyboard.press('Escape');await row.getByTestId('timeline-label').click();
+  await expect(page.getByRole('combobox',{name:'声音选择',exact:true})).toHaveValue('my-new-voice');
+  await expect(page.getByRole('combobox',{name:'声音选择',exact:true})).toContainText('当前声音 ID：my-new-voice');
+  await page.getByRole('combobox',{name:'声音来源',exact:true}).selectOption('manual');
+  const manual=page.getByLabel('声音 ID',{exact:true});await expect(manual).toHaveValue('my-new-voice');
+  await manual.fill('external-unknown-id');await manual.press('Enter');
+  await page.getByRole('heading',{name:'时间线默认配置',exact:true}).click();
+  await expect.poll(async()=>(await snapshot(page)).document.timelines[timeline.id]?.itemDefaults?.voiceId).toBe('external-unknown-id');
+  expect((await snapshot(page)).document.items[id]).toEqual(original);
+  expect(cloneCount).toBe(1);await page.keyboard.press('Escape');
+  expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
+});
+
+test('离开声纹详情后完成的克隆不设置默认或重新打开窗口，待验证结果保留 ID',async({page})=>{
+  let complete!:()=>void;let cloneCount=0;
+  await page.route('**/api/voice-clone',async route=>{cloneCount++;await new Promise<void>(resolve=>{complete=resolve;});
+    await route.fulfill({json:{requestId:route.request().headers()['x-pixel-request-id'],voice:{voiceId:'verification-id',name:'待验证',category:'cloned',status:'verificationRequired',reason:'请完成声音验证'}}});});
+  await openWorkbench(page);const state=await snapshot(page);
+  const timeline=Object.values(state.document.timelines).find(candidate=>candidate.modelId==='eleven_v4')!;
+  const label=page.locator(`[data-timeline-id="${timeline.id}"]`).getByTestId('timeline-label');
+  await label.click();await page.getByLabel('克隆音频',{exact:true}).setInputFiles({name:'sample.mp3',mimeType:'audio/mpeg',buffer:Buffer.from('review')});
+  await page.getByRole('button',{name:'克隆声纹',exact:true}).click();
+  await expect(page.getByTestId('voice-clone')).toContainText('正在克隆声纹');
+  await page.keyboard.press('Escape');complete();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(await snapshot(page)).toEqual(state);expect(cloneCount).toBe(1);
+  await label.click();await expect(page.getByTestId('voice-clone')).not.toContainText('verification-id');
+  expect(await snapshot(page)).toEqual(state);await page.keyboard.press('Escape');
+});
+
+test('参考输入始终可见，模式决定数量上下限；上传原子导入并引用，满额禁用',async({page})=>{
+  test.setTimeout(60_000);await openWorkbench(page);
+  const before=await snapshot(page);await createTimeline(page,'Alibaba: Wan 3.0');
+  const timeline=Object.values((await snapshot(page)).document.timelines).find(candidate=>!before.document.timelines[candidate.id])!;
+  const row=page.locator(`[data-testid="timeline-row"][data-timeline-id="${timeline.id}"]`);await row.scrollIntoViewIfNeeded();
+  await row.getByTestId('timeline-track').click({button:'right',position:{x:320,y:18}});
+  await page.getByRole('menuitem',{name:'新建生成草稿',exact:true}).click();
+  await expect.poll(async()=>(await snapshot(page)).document.timelines[timeline.id]!.itemIds.length).toBe(1);
+  const id=(await snapshot(page)).document.timelines[timeline.id]!.itemIds[0]!;await page.locator(`[data-item-id="${id}"]`).dblclick();
+  await expect(page.getByTestId('item-reference')).toBeVisible();
+  const mode=page.getByRole('combobox',{name:'参考方式',exact:true});await mode.selectOption('firstFrame');
+  await expect(page.getByTestId('input-capabilities')).toContainText('需要 1 个');
+  await expect(page.getByTestId('input-capabilities')).toContainText('PNG、JPEG、WebP');
+  await expect(page.getByTestId('input-capabilities')).toContainText('单文件最多 25 MiB');
+  let imports=0;let references=0;page.on('request',request=>{if(request.url().endsWith('/api/import'))imports++;if(request.url().endsWith('/api/media-reference'))references++;});
+  const upload=page.getByRole('button',{name:'上传参考图片',exact:true});
+  const beforeOversize=await snapshot(page);const oversizedChooser=page.waitForEvent('filechooser');await upload.click();
+  await(await oversizedChooser).setFiles({name:'too-large.png',mimeType:'image/png',buffer:Buffer.alloc(25*1024*1024+1)});
+  await expect(page.locator('.workspace-feedback')).toContainText('单文件最多 25 MiB');
+  expect(await snapshot(page)).toEqual(beforeOversize);expect(references).toBe(0);
+  const uploadFile=async(name:string)=>{const chooser=page.waitForEvent('filechooser');await upload.click();await(await chooser).setFiles({name,mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==','base64')});};
+  const first=(await snapshot(page)).revision;await uploadFile('first-frame.png');
+  await expect.poll(async()=>(await snapshot(page)).document.items[id]?.referenceAssetIds.length).toBe(1);
+  expect((await snapshot(page)).revision).toBe(first+1);
+  await expect(upload).toBeDisabled();await expect(page.getByTestId('item-reference')).toContainText('已达到当前参考上限');
+  await mode.selectOption('reference');await expect(upload).toBeEnabled();await expect(page.getByTestId('input-capabilities')).toContainText('最多 3 个');
+  await uploadFile('capability-second.png');await expect.poll(async()=>(await snapshot(page)).document.items[id]?.referenceAssetIds.length).toBe(2);
+  await uploadFile('capability-third.png');await expect.poll(async()=>(await snapshot(page)).document.items[id]?.referenceAssetIds.length).toBe(3);
+  await expect(upload).toBeDisabled();expect(imports).toBe(0);expect(references).toBe(3);
+  expect((await snapshot(page)).document.items[id]?.outputAssetId).toBeUndefined();
+  await page.keyboard.press('Escape');expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
 });
 
 test('时间线画面默认设置保留既有片段快照，刷新才应用到旧片段', async ({ page }) => {
@@ -502,7 +631,7 @@ test('播放指针点击、拖动和键盘定位联动预览，不改写项目�
   await expect(ruler).toHaveAttribute('aria-valuenow', '13600');
   await ruler.press('Home');
   await expect(ruler).toHaveAttribute('aria-valuenow', '0');
-  await expect(page.getByTestId('viewer')).toHaveText('暂无输出');
+  await expect(page.getByTestId('viewer')).toContainText('暂无输出');
   const zeroHandle = await page.getByTestId('timeline-playhead-handle').boundingBox();
   expect(zeroHandle).not.toBeNull();
   // The left half of the handle must remain usable over the sticky track label.
@@ -551,7 +680,7 @@ test('实际音频随播放指针定位素材时间，定位不会提交生成�
   await library.close();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.locator(`[data-testid="timeline-item"][data-item-id="${placed.id}"]`).click();
-  const audio = page.getByTestId('viewer').locator('audio');
+  const audio = page.getByTestId('viewer').locator(`audio[src$="/api/media/${placed.outputAssetId}"]`);
   await expect.poll(() => audio.evaluate((element: HTMLAudioElement) => element.readyState)).toBeGreaterThan(0);
   await page.getByTestId('timeline-ruler').click({ position: { x: 40, y: 8 } });
   await expect(page.getByTestId('timeline-ruler')).toHaveAttribute('aria-valuenow', '1250');
@@ -568,7 +697,7 @@ test('生成只经 Item 右键触发，测试隔离拦截后不出现假产物',
   await page.keyboard.press('Shift+F10');
   await expect(page.getByRole('menuitem', { name: '生成片段', exact: true })).toBeVisible();
   await page.getByRole('menuitem', { name: '生成片段', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('浏览器验证已阻止付费生成');
+  await expect(page.locator('.workspace-feedback')).toContainText('浏览器验证已阻止付费生成');
   const after = await snapshot(page);
   expect(after.document.items[id]?.outputAssetId).toBeUndefined();
   expect(after.revision).toBe(before.revision);
@@ -604,7 +733,7 @@ test('系统文件拖入主窗口走项目入口，浏览器开发版阻止误�
   // Nested timeline handlers cannot reinterpret an OS file drop as item placement.
   await page.getByTestId('timeline-track').first().dispatchEvent('dragover', { dataTransfer: transfer });
   await page.getByTestId('timeline-track').first().dispatchEvent('drop', { dataTransfer: transfer });
-  await expect(page.getByRole('status')).toContainText('请使用桌面版拖入项目文件或文件夹');
+  await expect(page.locator('.workspace-feedback')).toContainText('请使用桌面版拖入项目文件或文件夹');
   expect(page.url()).toBe('http://127.0.0.1:4320/');
   expect(imports).toBe(0);
   expect(await snapshot(page)).toEqual(before);
@@ -671,7 +800,7 @@ test('外部图片直接拖入时间线原子创建普通媒体轨，模型轨�
   const before=await snapshot(page);
   const data=await pictureTransfer(page);
   await page.getByTestId('timeline-workspace').dispatchEvent('drop',{dataTransfer:data});
-  await expect(page.getByRole('status')).toContainText('已放置 direct-picture.png');
+  await expect(page.locator('.workspace-feedback')).toContainText('已放置 direct-picture.png');
   const placed=await snapshot(page);
   expect(placed.revision).toBe(before.revision+1);
   const timeline=Object.values(placed.document.timelines).find(candidate=>!before.document.timelines[candidate.id])!;
@@ -700,9 +829,9 @@ test('外部图片直接拖入时间线原子创建普通媒体轨，模型轨�
   expect(second.document.items[second.document.timelines[timeline.id]!.itemIds[1]!]!.startTick).toBe(10000);
   const generated=Object.values(second.document.timelines).find(candidate=>candidate.modelId==='x-ai/grok-imagine-image-2.0')!;
   await page.locator(`[data-timeline-id="${generated.id}"]`).getByTestId('timeline-track').dispatchEvent('drop',{dataTransfer:data});
-  await expect(page.getByRole('status')).toContainText('请将媒体拖入普通媒体时间线');
+  await expect(page.locator('.workspace-feedback')).toContainText('请将媒体拖入普通媒体时间线');
   await page.getByTestId('viewer').dispatchEvent('drop',{dataTransfer:data});
-  await expect(page.getByRole('status')).toContainText('请将媒体拖入普通媒体时间线');
+  await expect(page.locator('.workspace-feedback')).toContainText('请将媒体拖入普通媒体时间线');
   expect(await snapshot(page)).toEqual(second);
   expect(imports).toBe(0);expect(placements).toBe(2);
   expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
@@ -713,7 +842,7 @@ test('纯文本参考经时间线基类创建编辑移动缩放复制删除，�
   await openWorkbench(page);
   const picture=await pictureTransfer(page);
   await page.getByTestId('timeline-workspace').dispatchEvent('drop',{dataTransfer:picture});
-  await expect(page.getByRole('status')).toContainText('已放置 direct-picture.png');await picture.dispose();
+  await expect(page.locator('.workspace-feedback')).toContainText('已放置 direct-picture.png');await picture.dispose();
   const before=await snapshot(page);
   await createTimeline(page,'纯文本时间轴');
   const created=await snapshot(page);
@@ -741,7 +870,8 @@ test('纯文本参考经时间线基类创建编辑移动缩放复制删除，�
   await page.keyboard.press('Escape');
   await note.click();
   // A reference track never becomes a synthetic Viewer output or hides media.
-  await expect(page.getByTestId('viewer').locator('img,video,audio')).toHaveCount(1);
+  await expect(page.getByTestId('viewer').locator('img[src^="/api/media/"]').first()).toBeVisible();
+  await expect(page.getByTestId('viewer').locator(`[data-composition-item="${id}"]`)).toHaveCount(0);
   await expect(note).toContainText('镜头 1：进入车站');
   await note.click({button:'right'});
   await expect(page.getByRole('menuitem',{name:'生成片段',exact:true})).toHaveCount(0);
@@ -749,7 +879,7 @@ test('纯文本参考经时间线基类创建编辑移动缩放复制删除，�
   await page.keyboard.press('Escape');
   const disk=await pictureTransfer(page);
   await row.getByTestId('timeline-track').dispatchEvent('drop',{dataTransfer:disk});
-  await expect(page.getByRole('status')).toContainText('请将媒体拖入普通媒体时间线');
+  await expect(page.locator('.workspace-feedback')).toContainText('请将媒体拖入普通媒体时间线');
   expect((await snapshot(page)).revision).toBe(initial.revision+1);
   await disk.dispose();
   const transfer=await page.evaluateHandle(()=>new DataTransfer());
@@ -776,4 +906,26 @@ test('纯文本参考经时间线基类创建编辑移动缩放复制删除，�
   expect(Object.keys(final.document.assets)).toHaveLength(Object.keys(before.document.assets).length);
   expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
   await page.reload();await expect(page.locator(`[data-item-id="${id}"]`)).toContainText('镜头 1：进入车站');
+});
+
+test('Viewer详情和信息跟随真实前景，选择下层、重排与空白时间不打开旧输出',async({page})=>{
+  await openWorkbench(page);const original=await snapshot(page);const fixtures:{timelineId:string;itemId:string;assetId:string}[]=[];
+  const edit=async(type:string,payload:JsonObject)=>{const state=await snapshot(page);const response=await page.request.post('/api/actions',{data:{type,payload,requestId:crypto.randomUUID(),projectId:state.document.id,expectedRevision:state.revision}});expect((await response.json() as ActionResult).ok).toBe(true);};
+  const row=(id:string)=>page.locator(`[data-testid="timeline-row"][data-timeline-id="${id}"]`);const viewer=page.getByTestId('viewer');
+  const checkDetail=async(assetId:string)=>{await viewer.dblclick({position:{x:60,y:60}});await expect(page.getByRole('dialog',{name:'片段详情',exact:true})).toBeVisible();
+    await page.getByTestId('modal-host').locator('.detail-link').filter({hasText:'输出媒体'}).dblclick();await expect(page.getByTestId('modal-host').locator('img')).toHaveAttribute('src',`/api/media/${assetId}`);await page.keyboard.press('Escape');await page.keyboard.press('Escape');};
+  try {
+    for(const [index,durationTicks] of [4000,7000].entries()) {const state=await snapshot(page);const response=await page.request.post('/api/media-place',{headers:{'Content-Type':'image/png','X-Pixel-Name':encodeURIComponent(`foreground-${index}.png`),
+      'X-Pixel-Project-Id':state.document.id,'X-Pixel-Request-Id':crypto.randomUUID(),'X-Pixel-Revision':String(state.revision),'X-Pixel-Start-Tick':'0'},data:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==','base64')});
+      const result=await response.json() as ActionResult;expect(result.ok).toBe(true);if(!result.ok)throw new Error(result.error.message);const fixture=result.outcome as unknown as typeof fixtures[number];fixtures.push(fixture);await edit('item.resize',{itemId:fixture.itemId,startTick:0,durationTicks});}
+    const [front,back]=fixtures as [typeof fixtures[number],typeof fixtures[number]];
+    const first=(original.document.timelineOrder??Object.keys(original.document.timelines))[0]!;await edit('timeline.reorder',{timelineId:front.timelineId,beforeTimelineId:first});await edit('timeline.reorder',{timelineId:back.timelineId,beforeTimelineId:first});
+    const before=await snapshot(page);await page.locator(`[data-item-id="${back.itemId}"]`).click();await expect(page.locator('.viewer-meta>span:last-child')).toHaveText('00:04');await checkDetail(front.assetId);expect(await snapshot(page)).toEqual(before);
+    const handle=row(back.timelineId).getByTestId('timeline-sort-handle');await handle.focus();await page.keyboard.press('Space');await expect(handle).toHaveAttribute('aria-pressed','true');await page.keyboard.press('ArrowUp');
+    await expect(page.locator('[id^="DndLiveRegion"]')).toContainText(`over droppable area ${front.timelineId}`);await page.keyboard.press('Space');
+    await expect.poll(async()=>(await snapshot(page)).document.timelineOrder?.[0]).toBe(back.timelineId);await expect(page.locator('.viewer-meta>span:last-child')).toHaveText('00:07');await checkDetail(back.assetId);
+    const after=await snapshot(page);expect(after.revision).toBe(before.revision+1);expect(after.document.items).toEqual(before.document.items);expect(after.document.timelines).toEqual(before.document.timelines);
+    const ruler=page.getByTestId('timeline-ruler');await ruler.focus();await ruler.press('End');await expect(viewer).toContainText('暂无输出');await expect(page.locator('.viewer-meta')).toHaveCount(0);
+    await viewer.dblclick({position:{x:60,y:60}});await expect(page.getByRole('dialog')).toHaveCount(0);expect(await snapshot(page)).toEqual(after);
+  } finally {for(const fixture of fixtures){if((await snapshot(page)).document.timelines[fixture.timelineId])await edit('timeline.delete',{timelineId:fixture.timelineId});if((await snapshot(page)).document.assets[fixture.assetId])await edit('asset.remove',{assetId:fixture.assetId});}}
 });

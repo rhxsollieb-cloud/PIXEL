@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  actionEnvelopeSchema,
+  actionEnvelopeSchema, assetGroupsSchema, timelineOrderSchema,
   type ActionEnvelope, type ActionReceipt, type ActionResult, type CallerContext,
   type DeepReadonly, type ErrorCode, type JsonObject, type ProjectChanged,
   type ProjectDocument, type ProjectSnapshot,
@@ -106,6 +106,13 @@ function assert(condition: unknown, message: string): asserts condition {
 export function assertProjectInvariants(document: ProjectDocument): void {
   assert(document.schemaVersion === 1 && document.id.length > 0, '项目版本或 ID 无效');
   const memberships = new Set<string>();
+  if (document.timelineOrder !== undefined) {
+    assert(timelineOrderSchema.safeParse(document.timelineOrder).success, '时间线顺序结构无效');
+    assert(document.timelineOrder.length === Object.keys(document.timelines).length, '时间线顺序必须覆盖全部时间线');
+    const ordered = new Set(document.timelineOrder);
+    assert(ordered.size === document.timelineOrder.length, '时间线顺序不能重复');
+    assert(document.timelineOrder.every(id => Object.hasOwn(document.timelines, id)), '时间线顺序中的时间线不存在');
+  }
   for (const [id, timeline] of Object.entries(document.timelines)) {
     assert(timeline.id === id, '时间线 ID 与索引不一致');
     assert(Number.isSafeInteger(timeline.ticksPerSecond) && timeline.ticksPerSecond > 0, '时间基准必须为正整数');
@@ -127,6 +134,18 @@ export function assertProjectInvariants(document: ProjectDocument): void {
     assert(!item.outputAssetId || Object.hasOwn(document.assets, item.outputAssetId), '输出资产不存在');
   }
   for (const [id, asset] of Object.entries(document.assets)) assert(asset.id === id, '资产 ID 与索引不一致');
+  if (document.assetGroups !== undefined) {
+    assert(assetGroupsSchema.safeParse(document.assetGroups).success, '素材分组结构或名称无效');
+    const groupedAssets = new Set<string>();
+    for (const [groupId, group] of Object.entries(document.assetGroups)) {
+      assert(group.id === groupId, '素材分组 ID 与索引不一致');
+      for (const assetId of group.assetIds) {
+        assert(Object.hasOwn(document.assets, assetId), '素材分组中的资产不存在');
+        assert(!groupedAssets.has(assetId), '资产不能重复属于同一分组或多个分组');
+        groupedAssets.add(assetId);
+      }
+    }
+  }
   assert(z.json().safeParse(document).success, '项目数据必须可序列化为 JSON');
 }
 

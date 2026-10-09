@@ -6,7 +6,7 @@ import { join } from 'node:path';
 /** 浏览器测试以单个本地宿主验证工作台；不调用外部模型服务。 */
 export default defineConfig({
   testDir: './tests',
-  testMatch: 'ui.spec.ts',
+  testMatch: ['ui.spec.ts', 'menu-ui.spec.ts', 'groups-ui.spec.ts', 'composition-ui.spec.ts', 'timeline-order-ui.spec.ts'],
   fullyParallel: false,
   workers: 1,
   retries: 0,

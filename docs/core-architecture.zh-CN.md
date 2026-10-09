@@ -6,20 +6,22 @@
 
 1.5 已加入纯文本参考与普通视频 / 音频 / 图片轨道，使用相同 Timeline 基类、目录和 Action；外部文本读取提供共享只读投影、HTTP 与离线命令。扩展职责、直接媒体放置的基线取舍及最终验证见[本地时间线与扩展边界](local-timelines-and-extension.zh-CN.md)。
 
-当前交付包含核心契约、五模型官方 SDK、本地文件工作台、React 界面和可启动的 Electron 桌面宿主。`src/workbench.ts` 已组合项目持久化、生成提交/outbox及内部结果挂载；本文件中标为骨架或目标的示例类仍可独立使用，不代表完整工作台的当前状态。SDK 已用模拟 HTTP 验证，尚未进行付费生成测试。参数、配置及诊断 CLI 见[模型接入与执行边界](model-integrations.zh-CN.md)，运行及独立详情窗口见[本地桌面与像素界面](desktop-ui.zh-CN.md)。当前实际使用 Electron、React、TypeScript、Vite 和 Zod；Radix、Zustand 与 dnd-kit 仍是可选方案。
+1.6 在这一基础上加入素材库自定义分组、持久化轨道顺序、真实媒体多轨叠加预览、声明驱动的声音选择与参考上传，以及按实际高度分栏的上下文菜单。必要的播放、排序、上传和对象编辑控件按用户要求可见，仍受对象、作用域、共享 Action 与统一视觉约束；相关基线修正见设计哲学 1.6，具体实施与许可边界见[声纹、输入、分组与叠加预览](voices-inputs-groups-and-composition.zh-CN.md)。
+
+当前交付包含核心契约、五模型官方 SDK、本地文件工作台、React 界面和可启动的 Electron 桌面宿主。`src/workbench.ts` 已组合项目持久化、生成提交/outbox及内部结果挂载；本文件中标为骨架或目标的示例类仍可独立使用，不代表完整工作台的当前状态。SDK 已用模拟 HTTP 验证，尚未进行付费生成测试。参数、配置及诊断 CLI 见[模型接入与执行边界](model-integrations.zh-CN.md)，运行及独立详情窗口见[本地桌面与像素界面](desktop-ui.zh-CN.md)。当前实际使用 Electron、React、TypeScript、Vite、Zod、dnd-kit 和 Remotion；Radix 与 Zustand 仍是可选方案。
 
 ## 1. 先固定产品中的对象与操作
 
-产品采用固定单路径：双击进入对象详情，右键发起离散命令，拖拽建立关系；1.4 按用户要求增加限定于 Timeline 左侧的单击默认配置导航例外。默认主界面只有 Viewer 与 Timeline，保留当前项目标题及必要窗口控制；不常驻资产库、模型参数、色板、版本、手势教程、配置或调试信息。新项目为空，空 Viewer 不预置示例画面或假波形。具体纠偏依据见[哲学对齐记录](philosophy-alignment.zh-CN.md)。
+产品采用稳定对象语法：双击进入对象详情，右键发起上下文命令，拖拽表达空间操作或关系；1.4 按用户要求增加限定于 Timeline 左侧的单击默认配置导航例外。1.6 允许相关上下文中的必要可见操作，不通过隐藏按钮牺牲可发现性；同一业务仍只有一个权威处理入口，手势及可见控件不能各写一套规则。默认主工作区仍由 Viewer 与 Timeline 构成，保留当前项目标题、必要窗口控制、播放控件和轨道排序手柄；素材库和模型参数按上下文出现。新项目为空，空 Viewer 不预置示例画面或假波形。具体历史纠偏依据见[哲学对齐记录](philosophy-alignment.zh-CN.md)，当前产品基线以设计哲学 1.6 为准。
 
 | 对象或区域 | 双击 | 右键 | 拖拽 |
 | --- | --- | --- | --- |
 | Project | 进入项目详情 | 项目命令 | 项目文件或已有目录拖入主窗口原位置打开；空文件夹初始化并打开空项目 |
-| Timeline 区域 | 左侧名称单击进入声明的详情；生成轨展示默认配置 | 空白处 → 新建时间线 → 选择类型；生成轨时间位置 → 生成草稿；文本轨 → 文本片段；生成轨左侧 → 刷新默认配置 | Asset 放置、item 移动；系统媒体进入普通媒体轨或空白区域原子放置 |
+| Timeline 区域 | 左侧名称单击进入声明的详情；生成轨展示默认配置 | 空白处 → 新建时间线 → 选择类型；生成轨时间位置 → 生成草稿；文本轨 → 文本片段；生成轨左侧 → 刷新默认配置 | Asset 放置、item 移动；系统媒体进入普通媒体轨或空白区域原子放置；左侧排序手柄上下排列轨道 |
 | Timeline item | 进入参数及输出详情 | 生成、重新生成、复制、删除等 | 拖边缘修改时间范围；Asset 拖入引用区域建立 Reference；item 拖入资产库保存为资产 |
-| 资产库 | 双击资产进入详情 | 资产及资源库命令 | 外部媒体拖入导入资产 |
+| 资产库 | 双击资产进入详情 | 资产及资源库命令；分组在库内通过可见名称字段、操作与归属选择管理 | 外部媒体拖入导入资产 |
 | Asset | 进入媒体详情 | 素材命令 | 建立 item 的参考素材关系 |
-| Viewer | 进入输出详情 | 素材库：打开当前项目素材上下文，空预览及已有输出均可 | 拖出已经准备好的真实文件 |
+| Viewer | 进入输出详情 | 素材库：打开当前项目素材上下文，空预览及已有输出均可 | 当前位置只有一个有效媒体层时，拖出已经准备好的真实文件；多层画面不伪装为已导出合成文件 |
 
 模型不是可拖到时间线上的媒体对象。新建操作从 Timeline 工作区空白处的右键菜单进入“新建时间线”，选择类型后执行 `timeline.create`，只创建对应的空 Timeline，不隐式附送 Item 或提示词。生成新内容的标准路径是已有 Timeline 时间位置右键 → 新建生成草稿，提交 `item.createDraft`，只接受 `timelineId` 与 `startTick`，不接受 `assetId`，结果是不带输出的 Item。放置已有素材的标准路径是 Asset → Timeline 时间位置，提交带 `assetId` 的 `item.create`，结果是已关联该素材的 Item。插件为两者提供默认数据及约束；参数编辑随后发生在 Item 详情中。
 
@@ -33,6 +35,8 @@
 ProjectDocument
   ├─ timelines: TimelineData
   │    └─ itemIds → TimelineItemData
+  ├─ timelineOrder? → 全部 Timeline ID 的上下顺序
+  ├─ assetGroups? → 分组名称及 Asset ID 成员
   └─ assets: AssetData
        ↑ item.referenceAssetIds / item.outputAssetId
 ```
@@ -53,6 +57,8 @@ ProjectDocument
 | 窗口宿主 | `DesktopWindowHost` | 统一工作窗口创建、外观、控制与生命周期；按所属窗口管理局部详情 | 把所有独立工作窗口都变成应用级 Modal |
 | 前端 | `ContextActionRegistry` | 从对象上下文收集右键语义命令及可用状态 | 作为后端权限检查的替代 |
 | 前端 | `DragRegistry` | 将有效拖拽关系转换为统一动作 | 自行访问文件或绕过 Action System |
+| 前端手势适配器 | `TimelineSortHost` / `SortableTimelineRow` | 通过 dnd-kit 处理上下排序的鼠标及键盘手势，提交 `timeline.reorder` | 保存第二份轨道顺序、改变 Item 时间或复用文件拖拽权限 |
+| 前端播放投影 | `buildCompositionPlan` / `CompositionPreview` | 从同一快照投影轨道顺序、真实媒体及源偏移，组合 Remotion Player | 写入项目、调用生成模型或伪造合成导出文件 |
 | 前端 | `GuiActionPathRegistry` | 宿主统一登记一个动作的唯一 GUI 路径 | 限制 CLI 或 Agent 调用动作 |
 | 跨窗口宿主 | `ObjectDragBroker` / `browserWindowHost` | 可信会话的创建、解析、单次消费与结束；绑定来源和目标窗口 | 第二套业务 Action 或可写项目状态 |
 | 项目文件适配器 | `preparePixelProjectLocation` / `readWorkbenchProjectFile` | 校验项目位置、持久化结构、模型与素材；仅为空目录创建初始空快照 | 把普通文件改写成项目、合并当前项目或读取项目目录的凭证 |
@@ -70,6 +76,7 @@ ProjectDocument
 | 模型目录 / 插件 | `ModelRegistry` / `ModelTimelinePlugin` | 五模型的 schema、字段、参数规范化、查询和独立 Item 语义 | 另建 GUI 路径、读取凭证或写项目 |
 | 模型 | `BaseModelProvider` | 公共 `generate()` 校验、总超时、取消、错误脱敏与产物归属；受保护的 `performGeneration()` 扩展点 | 项目修改和调度 |
 | 模型适配器 | `ElevenLabsModelProvider` / `OpenRouterModelProvider` | 官方 SDK 调用、流存储与异步视频查询 | renderer 凭证、项目事务或自动付费重试 |
+| 账号资源服务 | `VoiceService` / `VoiceProvider` | 有界读取声音及受控声音克隆命令，独立 operation ledger 防重复提交 | 项目声音字段编辑、生成调度或声称账号操作可随项目撤销 |
 | 音频后处理 | `AudioPostProcessor` / `FfmpegAudioPostProcessor` | 按可信发音边界解码、裁尾、淡出与重编码，继承任务取消和超时 | 猜测最后若干字节、项目修改或第二套生成调度 |
 | 任务契约 | `GenerationJob` / `GenerationArtifact` | 可持久化任务、执行状态和输出记录 | 进入项目的 undo 栈 |
 | 任务接口 | `GenerationCoordinator` / `JobRepository` / `ArtifactStore` | 规定调度、原子状态更新和输出存储边界 | 声称完整 coordinator 已实现 |
@@ -149,6 +156,21 @@ GUI、正式项目 CLI 和 Agent 的架构约束是提交相同 `ActionEnvelope`
 
 Zod 位于不可信数据进入后端的边界：信封先按严格 schema 解析，payload 再由 handler 或插件的 schema 解析；TypeScript 类型本身不能验证运行时输入。所用的严格对象和 JSON schema 见 [Zod 官方 schema 文档](https://zod.dev/api)。插件也不得仅靠前端字段约束保护项目数据。
 
+1.6 的项目扩展保留版本 1：`ProjectDocument.assetGroups?` 是 `Record<string, { id, title, assetIds }>`，名称在 Action 输入去除首尾空白，保存值须为规范化的 1–80 字符文本；允许不同 ID 使用同名。索引 key 必须等于 group.id，成员 Asset 必须存在，同组及跨组均不能重复，一个 Asset 最多属于一个分组。未归组是未出现在任何成员列表的派生状态，没有自动创建的“未分组”记录。分组只组织素材库，不改变 Asset 身份、文件句柄或片段引用。
+
+`ProjectDocument.timelineOrder?` 保存从上到下的 Timeline ID 数组，出现时必须完整覆盖当前所有轨道、唯一且没有不存在的 ID。`orderedTimelineIds()` 在字段缺省时返回 `Object.keys(timelines)` 的顺序副本，仅查询不会改写旧项目。已有分组和顺序在项目快照、每个历史 before/after 及正常重新打开时都经同一严格 schema 与 `assertProjectInvariants()` 校验；不把界面容错当作持久化合法性。旧文件缺少这两个字段时不迁移、不自动建组或填默认顺序。
+
+| 项目 Action | 输入及提交语义 |
+| --- | --- |
+| `assetGroup.create` | `{ title }`；生成独立 ID、创建空成员列表 |
+| `assetGroup.rename` | `{ groupId, title }`；按 ID 修改名称 |
+| `assetGroup.remove` | `{ groupId }`；只删除分组，成员素材及已有引用继续存在 |
+| `assetGroup.moveAsset` | `{ assetId, groupId? }`；验证对象存在后移除原归属，加入目标组；省略 groupId 则回到未分组 |
+| `asset.remove` | 沿用已有删除规则，并清除该 Asset 的分组成员记录 |
+| `timeline.reorder` | `{ timelineId, beforeTimelineId? }`；在同一项目顺序中移到目标轨前，省略 beforeTimelineId 则移到末尾；不改变片段时间与生成输入 |
+
+上述编辑共用 `Workbench` / `ActionExecutor` 的权限、revision、幂等、回执和历史事务。显式顺序已存在时，新建、删除轨道和外部媒体放置新建轨道会在同一事务维护完整顺序；未出现顺序的旧项目继续使用原字典顺序，首次明确重排才保存顺序。分组选择、筛选与排序拖动预览属于窗口局部状态，不能乐观改写权威快照。
+
 ## 5. 同步动作：以移动 item 为例
 
 ```mermaid
@@ -215,7 +237,7 @@ sequenceDiagram
   Provider-->>Files: 输出文件
   Files-->>Jobs: 持久化 artifact
   Jobs->>Jobs: 记录任务完成
-  Jobs->>Exec: internal generation.applyResult
+  Jobs->>Exec: internal generation.apply
   Exec->>Project: 检查 item、generationToken、输入指纹
   alt 请求仍对应当前输入
     Exec->>Project: 原子关联 outputAssetId 并增加 revision
@@ -233,9 +255,9 @@ sequenceDiagram
 
 `generationToken` 标识一次当前生成输入的有效性；影响输入的编辑或重新生成均换新 token，撤销也生成新 token，不能复用历史 token。`inputFingerprint` 对捕获的模型、参数、设置、文本 context、引用和时间语义生成稳定指纹，用于结果检查和可能的缓存。任务执行使用捕获的 request，不能中途读取 item 的最新参数。自动前后文的邻居文本、顺序或音色发生变化时，当前捕获会生成不同指纹，旧结果不能挂载；无关时间线的编辑仍不使结果失效。
 
-生成结束首先保存 artifact，再检查是否可以关联到当前 item。`getGenerationResultStaleness()` 已实现纯检查：任务必须成功、project 和目标必须匹配、token 及后端计算的当前 fingerprint 必须仍一致；传入 attempt token 时还检查是否为旧 attempt。它不比较全局 revision，不相关的时间线编辑不应使生成结果过期。工作台的 `generation.applyResult` handler 已在提交事务内执行这些检查，并用 `isArtifactOwnedByJob()` 验证 artifact 的 job ID 与成功产物列表。
+生成结束首先保存 artifact，再检查是否可以关联到当前 item。`getGenerationResultStaleness()` 已实现纯检查：任务必须成功、project 和目标必须匹配、token 及后端计算的当前 fingerprint 必须仍一致；传入 attempt token 时还检查是否为旧 attempt。它不比较全局 revision，不相关的时间线编辑不应使生成结果过期。工作台的 `generation.apply` handler 已在提交事务内执行这些检查，并用 `isArtifactOwnedByJob()` 验证 artifact 的 job ID 与成功产物列表。
 
-结果过期时，任务的成功输出仍存在，但不会覆盖用户后来的编辑。artifact 的清理、保留和重新关联另行定义。结果挂载动作名为 `generation.applyResult`，所需权限为 `generation.apply`，只授予后端内部执行入口；renderer 不能通过声称任务完成而上传任意输出路径。
+结果过期时，任务的成功输出仍存在，但不会覆盖用户后来的编辑。artifact 的清理、保留和重新关联另行定义。结果挂载动作名为 `generation.apply`，所需权限为 `generation.apply`，只授予后端内部执行入口；renderer 不能通过声称任务完成而上传任意输出路径。
 
 任务终态为 `succeeded`、`failed` 和 `canceled`；终态记录不重新打开。`cancelRequested` 只能转为 `canceled`，供应商迟到的成功回调不能把它改成成功。`interrupted` 是可恢复状态，恢复到 `queued` 时 `transitionJob()` 递增 attempt、清除旧执行结果并保留已经持久化的 `providerTaskId`；恢复继续查询该远端任务。对失败或取消任务重试需创建新 job ID，本次 runner 不自动重试。
 
@@ -245,10 +267,11 @@ sequenceDiagram
 
 | 状态 | revision | undo/redo | 说明 |
 | --- | --- | --- | --- |
-| 项目结构、item 参数、素材关系 | 修改时递增 | 可设计为可撤销 | 后端事务内记录 |
+| 项目结构、item 参数、素材关系、分组与轨道顺序 | 修改时递增 | 可设计为可撤销 | 后端事务内记录；记录历史不等于 undo/redo 已实现 |
 | 生成任务状态、进度与失败，仅更新 ledger | 不增加项目 revision | 不进入项目撤销栈 | 提交时若换项目 token，仍按项目编辑计 revision |
 | 将输出关联到 item | 修改项目时递增 | 可撤销关联 | 不删除已生成文件 |
-| 选择、Modal path、滚动和拖拽预览 | 不增加 | 不进入 | 每个窗口局部状态 |
+| 选择、Modal path、滚动、拖拽预览、播放位置与播放状态 | 不增加 | 不进入 | 每个窗口局部状态 |
+| 声音查询及账号声音克隆 | 不修改项目 | 不进入 | 独立账号命令与 operation ledger；选择得到的 voiceId 后才提交原字段 Action |
 | 外部模型调用和已发生的费用 | 不增加 | 不能靠 undo 撤回 | 取消是单独命令 |
 
 回执里的 `undoable` 是动作能力描述。当前内存 repository 记录 before/after 历史，`HistoryService` 只提供接口，尚未实现 replay。完整的 undo/redo 服务还需要逆操作或受控快照、redo 栈以及分组规则，不能仅有这个布尔值就算已实现。undo 和 redo 都是新的事务、产生新的 revision；任何影响生成有效性的恢复必须重新计算 token。MVP 可以先完成单项目串行历史，不必引入多人协作操作变换。
@@ -257,11 +280,15 @@ sequenceDiagram
 
 ## 8. 插件扩展与版本迁移
 
-1.5 新增四种本地插件，`modelId` 仅生成轨拥有；`TimelineRegistry` 统一解析和查询，`ModelRegistry` 专注 SDK 模型。Manifest 明确 `capabilities`、`supportedActions`、`referenceTextFields` 和 `overlapPolicy`，`referenceLimit()` 从声明供 GUI / 后端共用，不按模型名称猜引用限制。模型的正文、必需文本字段及跨字段生成 schema 提示也由 descriptor 明确声明，新模型没有 `prompt` 不会被共同描述模板阻断。本地参考与普通媒体使用同一时间壳和 Action，没有第二套可写项目。完整契约、基线取舍和第 10 节评审见[本地时间线与扩展边界](local-timelines-and-extension.zh-CN.md)。
+`ModelDescriptor` / `ModelDeclaration` / `TimelineDeclaration.referenceMaxBytes` 描述单个参考文件的字节上限。当前 Wan / Grok 共用 `MAX_IMAGE_REFERENCE_BYTES=25 MiB`，GUI、上传与关系 Action、生成输入捕获使用 `referenceExceedsByteLimit()`，SDK 受控读取也按该常量检查真实内容。旧素材没有大小元数据时保持未知，不虚构已通过验证；模型上限不等于通用媒体传输上限。新增支持引用的模型应声明相应大小约束，不能让组件或适配器各写一份数字。
 
-Timeline 插件只声明语义：支持的 item kind、默认数据、字段 schema、时间限制与可用命令。`createTimeline()` 校验本地或生成身份并构造空时间线数据，`createItem()` 构造并校验 item 数据，两者都不自行写入项目；宿主 handler 在事务中维护成员关系、素材存在性和重叠规则。宿主统一渲染参数字段、菜单、拖拽提示、错误和详情布局，保持无按钮和固定路径规则。插件扩展新字段不应带来新的视觉框架。`VideoTimelinePlugin` 仍是 `example.video` 的本地示例；真实五模型另通过 `ModelTimelinePlugin` 声明各自的参数与输出。
+1.5 新增四种本地插件，`modelId` 仅生成轨拥有；`TimelineRegistry` 统一解析和查询，`ModelRegistry` 专注 SDK 模型。Manifest 明确 `capabilities`、`supportedActions`、`referenceTextFields` 和 `overlapPolicy`。1.6 将正文及必需文本字段 `requiredTextFields`、引用类型、上限和条件下限，以及字段 `choicesSource` 明确放进共享声明；`src/reference-policy.ts` 的 `referenceLimit()` / `referenceMinimum()` 供 GUI 和后端共用，不按模型名称猜限制。关系编辑及文件校验检查引用类型与上限；生成请求准备还检查必需下限，未完成的草稿可以暂时没有参考。Wan 的 firstFrame 模式声明 minimum=maximum=1，其余模式按同一策略计算。没有固定 `prompt` 字段的新模型不会被共同描述模板阻断。本地参考与普通媒体使用同一时间壳和 Action，没有第二套可写项目。完整契约、基线取舍和第 10 节评审见[本地时间线与扩展边界](local-timelines-and-extension.zh-CN.md)。
+
+Timeline 插件只声明语义：支持的 item kind、默认数据、字段 schema、时间限制与可用命令。`createTimeline()` 校验本地或生成身份并构造空时间线数据，`createItem()` 构造并校验 item 数据，两者都不自行写入项目；宿主 handler 在事务中维护成员关系、素材存在性和重叠规则。宿主统一渲染参数字段、菜单、可见操作、拖拽提示、错误和详情布局，遵守设计哲学 1.6 的对象与共享入口规则。插件扩展新字段不应带来新的视觉框架。`VideoTimelinePlugin` 仍是 `example.video` 的本地示例；真实五模型另通过 `ModelTimelinePlugin` 声明各自的参数与输出。
 
 `PluginFieldDeclaration` 已支持 object / array、子字段 children、条件呈现 visibleWhen 和 nullable；例如 voiceSettings 与 music compositionPlan 可通过同一详情宿主逐层显示。草稿默认值与生成必填校验分开，Asset→Timeline 的 Item 构造不必编造 prompt 或 voiceId。音频 outputFormat 仅放 Item params，Wan/Grok 的画面默认设置放 Timeline settings，新 Item 捕获为 generationSettings；设置快照是执行数据，不增加第二个同义 GUI 参数入口。
+
+`choicesSource: { kind: 'providerVoice', providerId, modelId }` 使共同字段宿主按声明读取声音选项，renderer 不直接调用 SDK 或读取凭证。`VoiceService` 的查询与克隆是账号资源命令，使用独立 operation ledger，不能伪装成项目 Action 或通过项目 undo 撤销账号副作用；选择声音 ID 仍由原来的默认配置或 Item 参数 Action 保存。支持文件参考的 Item 详情始终呈现上传操作、当前数量和模型上下限；库 Asset 拖拽与系统文件上传共用当前引用策略及权威关系校验，字节适配器先验证并保存素材，再经受信 Action 建立关系。不支持引用的对象只显示简短输入说明，不显示空引用管理。具体账号、超时和重放边界见[声纹、输入、分组与叠加预览](voices-inputs-groups-and-composition.zh-CN.md)。
 
 1.4 将 `TimelineData.itemDefaults` 定义为稀疏、显式的 Item 参数默认映射。`ModelDeclaration.defaultFields` / `defaultsJsonSchema` 宣告可默认化的字段，`paramsDefaults` 提供宿主显示用的模型基础值；默认 schema 不自动填入未修改字段。`BaseTimelinePlugin.validateItemDefaults()` 校验稀疏配置，`resolveItemDefaults()` 按插件 manifest.defaultFields 解析有效默认值，供 `createItem()` 与显式刷新共用；创建时再合并显式参数，并捕获 `generationSettings`。正文、prompt、compositionPlan、手动前后文及素材引用不进入默认映射。
 
@@ -281,7 +308,21 @@ Zod schema、方法和 provider 实例属于进程内的 registry，不能直接
 
 Modal 的 path、局部选中和表单状态只属于当前窗口。每个 `ModalFrame` 有独立 `scopeId`，`isInteractive()` 只允许该窗口顶部 frame；无对象详情时允许该工作窗口的根作用域。宿主把来源和目标各自的作用域检查用于右键、拖拽和编辑快捷键，防止 drop 越过所属窗口的对象详情改背景。另一个非模态工作窗口可继续作为合法来源或目标。`reconcile()` 在对象删除后退回仍存在的祖先；导航由 path 管理，不由 UI 库默认的应用级模态行为决定。
 
-素材库从 Viewer 菜单直接打开独立非模态工作窗口，其根是素材列表，没有 `ModalNavigator` 根 frame。库内双击对象在库 document 中进入单一 ModalHost 的局部详情，只隔离库 document，主窗口仍工作；详情 Esc 返回库，库根 Esc / close 关闭窗口。真实库 Asset → 主 Timeline 执行放置或 Item 引用，主 Item → 库执行保存复用；不在库内复制 `relation-surface` 或可复用输出来源作为关系替代面。跨窗口关系经目标窗口自己的 `DragRegistry` 构造原 Action，支持引用且有已有关系或合法拖拽时才显示引用区。打开/关闭库不进入项目 Action 或 revision，不迁移既有项目。
+素材库从 Viewer 菜单直接打开独立非模态工作窗口，其根是素材列表，没有 `ModalNavigator` 根 frame。库内双击对象在库 document 中进入单一 ModalHost 的局部详情，只隔离库 document，主窗口仍工作；详情 Esc 返回库，库根 Esc / close 关闭窗口。真实库 Asset → 主 Timeline 执行放置或 Item 引用，主 Item → 库执行保存复用；不在库内复制 `relation-surface` 或可复用输出来源作为关系替代面。跨窗口关系经目标窗口自己的 `DragRegistry` 构造原 Action；1.6 中支持引用的 Item 详情始终显示引用区和上传操作，并复用共享上下限。打开/关闭库及分组导航不进入项目 Action 或 revision，分组编辑与成员归属才提交项目 Action。
+
+`PixelContextMenu` 使用实际命令行高按可视高度分栏，列超出可视宽度时在菜单内部横向滚动；保留原命令顺序、说明与 disabled 状态。上下键在列内循环并跳过禁用项，左右键进入邻列，Home/End 到首尾，Enter/Space 执行原命令一次；视口 resize 重新分栏并保留当前命令焦点。布局、键盘和关闭行为集中在像素组件，不新增业务 Action 或第二套菜单入口，字号继续统一为 12px。
+
+### 9.1 轨道手势与多轨播放投影
+
+`web/timeline-sortable.tsx` 组合固定版本的 `@dnd-kit/core` 6.3.1、`@dnd-kit/sortable` 10.0.0 与 `@dnd-kit/utilities` 3.2.2，只负责左侧排序手柄的 Pointer / Keyboard 手势、命中及临时位置。结束时调用同一 `timeline.reorder`，上下顺序来自 `orderedTimelineIds()` 的后端投影；左侧名称单击默认配置继续保留。轨道排列是宿主空间手势，不能借 dnd-kit 替换系统 File、跨窗口对象 token 或原生导出票据的权限适配器。
+
+`web/composition.ts` 将快照投影为播放计划，`CompositionPreview` 组合 `@remotion/player` / `remotion` 4.0.534；新包不持有第二份项目状态。当前固定 16:9、1280×720、60fps，没有持久化画布规格字段。上方 Timeline 的可见媒体层在前景，透明图像及视频保持透明背景，图像 / 视频按 contain 比例显示；所有轨道同时生效，纯文本笔记和未生成草稿不入画，选择其他轨道不会遮蔽媒体。同轨及跨轨并发音频使用独立 `Html5Audio`，视频使用 `Html5Video`，`trimBefore` 从所属轨道的 `sourceOffsetTicks` 和时钟推导，不改写媒体文件。
+
+媒体区间按整数 tick 的半开范围投影到 60fps 帧时钟；末尾保留一个空白帧，外部指针越过作品末尾时不会停留在最后输出。Player 的播放 / 暂停与时间尺共用双向 playhead，帧事件只同步局部播放位置，避免外部 seek 反馈循环；预览帧精度不等于源媒体采样精确裁切。播放位置、暂停状态及计划不进入 ProjectDocument、revision 或撤销历史。Asset 详情和素材库继续使用单素材预览。
+
+多轨叠加与同时播放已实现，合成媒体文件导出仍待实现。Viewer 仅在当前位置恰好一个有效媒体层、真实文件已准备时沿用现有原生拖出；多层画面不能导出某个层来冒充合成结果，内部图片 / 视频的默认 HTML 文件拖拽也被关闭。以后增加项目画布规格或离线渲染时仍从同一时间线顺序、媒体关系与权威数据读取，不能让播放器库反向定义项目语义。
+
+### 9.2 跨窗口对象拖拽与系统文件
 
 跨窗口拖拽不能共享一份 React 拖拽内存。实际桌面适配器为 `electron/object-drag-broker.mjs` 的 `ObjectDragBroker`，通过 preload 的 `beginObjectDrag()` 创建限时会话，`resolveObjectDrag()` 验证 hover，`finishObjectDrag()` 在合法 drop 时原子解析并单次消费，`endObjectDrag()` 结束或取消。开始、解析与消费使用窄同步 IPC，以满足 dragstart 设置 DataTransfer 和 hover/drop 的同步时机；结束清理为异步，并给 Chromium 跨 renderer 的 dragend/drop 顺序保留 350ms 宽限。DataTransfer 只携带不透明 token，来源窗口由可信 IPC sender 绑定，主进程核验窗口存活、交互资格、同项目、当前对象与偏移；过期、来源关闭、对象删除或作用域失效均清理会话。目标自己的 `DragRegistry` 检查角色与作用域，后端执行时仍校验权限、媒体类型和位置约束，最终执行既有 Action。核心 `ObjectDragSession / ObjectDragTransport` 已替换早期异步草稿，Electron 和浏览器适配器共用实际同步契约，主进程不依赖 renderer。主动取消传 canceled=true 立即撤销，真实 dragend 才保留宽限；drop 的偏移来自本次已解析的会话。payload 不携带凭证、任意文件路径或闭包；跨项目复制/导入尚未定义，不接受悬空 ID。最新验证见本地时间线与扩展边界文档。
 
@@ -303,20 +344,24 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 
 | 范围 | 当前状态 |
 | --- | --- |
-| 共享项目、动作、任务、artifact 契约 | 已实现 |
+| 共享项目、动作、任务、artifact 契约 | 已实现；1.6 增加可选分组与轨道顺序，旧版本 1 文件无默认改写，所有历史严格校验 |
 | GUI / Agent 共用 CapabilityCatalog 能力查询 | 仅接口与查询 schema |
 | 正式项目 CLI / Agent 的可信 Action 适配器 | 待实现；诊断 CLI 不编辑 GUI 项目 |
 | 动作执行器、输入校验、内存 repository 与移动示例 | 已实现核心骨架 |
-| `timeline.create`、`item.createDraft`、`item.create`、`generation.submit` / `generation.applyResult` handler | `src/workbench.ts` 已实现；新项目为空，创建 Timeline 不隐式创建 Item；生成草稿显式创建，已有素材经拖拽放置；结果挂载仅内部调用 |
+| `timeline.create`、`item.createDraft`、`item.create`、`generation.submit` / `generation.apply` handler | `src/workbench.ts` 已实现；新项目为空，创建 Timeline 不隐式创建 Item；生成草稿显式创建，已有素材经拖拽放置；结果挂载仅内部调用 |
 | 前端动作客户端、投影、path 导航、菜单与拖拽 registry | 已实现框架无关骨架；示例演示拖拽到投影的完整链路 |
 | Timeline 插件、视频示例及五真实模型语义目录 | 已实现纯构造、字段/schema/defaults、有界查询与统一 GUI 字段宿主 |
 | 本地文本、视频、音频、图片与统一时间线目录 | 已实现同一插件基类、能力声明、时间壳与 Action；系统媒体原子放置及本地音视频时长探测 |
 | Agent 文本只读投影及 CLI | 已实现 HTTP / 离线共用投影、时间与正文筛选、有界 Unicode 分片和 revision 游标；没有 Agent 编辑适配器 |
 | 模型 provider 执行模板及两官方 SDK 适配器 | 已实现总超时、取消、脱敏错误、产物守卫；模拟 HTTP 验证 |
 | 时间线默认配置及明确刷新 | 已实现稀疏默认值、Item 生成设置快照与共享 Action；左侧单击配置、右键刷新；旧片段只在显式刷新时更新 |
+| 素材库自定义分组 | 已实现新建、改名、只删分组、单一成员归属及 Asset 删除清理，共用项目 Action、事务与持久化 |
+| 轨道上下顺序 | 已实现 dnd-kit 手势、`timeline.reorder`、共享顺序投影及新建 / 删除 / 外部新轨事务维护；片段时间不变 |
+| 模型输入说明、参考上传与声音字段来源 | 已实现声明驱动的必需文本、引用上下限和 providerVoice；支持参考的详情持续呈现上传及数量；声音查询 / 克隆采用独立账号服务及 operation ledger |
 | Eleven v4 前后文与语音裁尾 | Text to Dialogue 官方 SDK 接口；后端捕获同时间线同音色邻接文本，输入指纹保护旧结果；可替换音频后处理器，真实解码和重编码 |
 | 任务状态转换、attempt 及结果有效性纯检查 | 已实现 |
-| React Timeline、ModalHost、Viewer | 默认仅 Viewer + Timeline；逐层详情、右键、字段、移动/边缘拖拽、时间定位与独立库已实现；浏览器采用同源 popup，真实窗口关系及局部详情隔离已通过验证；完整合成播放待实现 |
+| React Timeline、ModalHost、Viewer | Viewer + Timeline；逐层详情、分栏菜单、字段、移动/边缘拖拽、时间定位、排序与独立库已实现；相关可见操作使用共同宿主；浏览器采用同源 popup，局部详情隔离保持 |
+| 多轨叠加预览及并发播放 | 已实现 Remotion Player 真实图像 / 视频层、上下前景、透明与源偏移、并发音频及双向指针；当前 1280×720 / 60fps；合成文件导出待实现 |
 | Electron 窗口宿主及跨窗口拖拽 | 共同 `DesktopWindowHost`、非模态 workspace/library、窄 preload 与 `ObjectDragBroker` 已实现；真实窗口间放置、引用和复用及局部详情隔离已通过原生验证 |
 | 任务/文件持久化及 Wan 远端任务恢复 | 已实现文件 ledger、产物存储和 runner run/resume；单后端进程 |
 | 项目持久化、token 与 job/outbox 联合事务、自动调度 | 单机文件工作台已实现；事务保存 outbox 后消费，含启动恢复及旧结果守卫 |
@@ -330,7 +375,7 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 
 1. 实现项目版本迁移与缺失插件占位；当前不支持的文件保留原内容并拒绝打开。
 2. 实现项目 undo/redo 的受控重放及 token 更新。
-3. 实现完整 Timeline 合成播放与导出，沿用 Viewer 唯一原生拖出手势。
+3. 在已完成的多轨预览上实现合成文件导出，补齐源偏移加显示区间的严格边界及可扩展画布规格；导出沿用 Viewer 原生拖出。
 4. 扩展 Agent 能力发现与可信适配器，继续复用 Action 与业务规则。
 
 第一版不需要微服务、通用工作流图或复杂继承系统。已有边界足以在单机 Electron 后端内逐步扩展，后续迁移远程生成服务时仍保留同一动作与任务契约。

@@ -1,14 +1,21 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react';
 import type { AssetData, DeepReadonly, GenerationJob, JsonObject, JsonValue, MediaKind, ObjectRef, TimelineItemData } from '../src/contracts.js';
+import { orderedTimelineIds } from '../src/contracts.js';
 import { ActionClient, ProjectProjectionStore, type ContextActionContext, type DragSource, type DragTarget } from '../src/frontend.js';
-import type { TimelineDeclaration } from '../src/timeline-catalog.js';
+import { referenceLimit, referenceMinimum, type TimelineDeclaration } from '../src/timeline-catalog.js';
+import type { VoiceSummary } from '../src/voice-contracts.js';
 import type { PluginFieldDeclaration } from '../src/plugins.js';
 import { HttpDesktopBridge, assetUrl, mediaMimeType, readJson, type ProjectSessionDescriptor } from './bridge.js';
 import { initialDetailObject, type DesktopObjectDrag } from './desktop.js';
 import { browserWindowHost } from './browser-window.js';
 import { createInteractionHost, declarationForTimeline } from './interaction.js';
-import { clampPlaybackMs, itemAtPlaybackTime, playbackTimeLabel, sourcePlaybackSeconds } from './playback.js';
+import { clampPlaybackMs, playbackTimeLabel } from './playback.js';
+import { activeCompositionLayers, buildCompositionPlan } from './composition.js';
+import { CompositionPreview } from './composition-preview.js';
 import { atPath, defaultFromSchema, FieldEditor, fieldLabel, schemaAtPath, withPath, type FieldPath } from './fields.js';
+import { VoiceCloneForm } from './voice-field.js';
+import { AssetGroups } from './asset-groups.js';
+import { SortableTimelineRow, TimelineSortHost } from './timeline-sortable.js';
 import { PixelBadge, PixelContextMenu, PixelEmpty, PixelField, PixelIcon, PixelInput, PixelModalHost, PixelPanel, PixelProgress, PixelWindowHost, type PixelContextMenuItem } from './ui/index.js';
 
 const MIME = 'application/x-pixel-object';
@@ -109,18 +116,19 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   const [resize,setResize]=useState<{id:string;startTick:number;durationTicks:number} | undefined>();
   const [exportTicket,setExportTicket]=useState<{assetId:string;ticket:string} | undefined>();
   const [exportRefresh,setExportRefresh]=useState(0);
+  const [voiceRefresh,setVoiceRefresh]=useState(0);
   const [fieldPaths]=useState(()=>new Map<string,FieldPath>());
   const missingTypes=useRef(new Set<string>());
   const current=path.at(-1);
   const document=snapshot?.document;
-  const timelines=Object.values(document?.timelines ?? {});
+  const timelines=document?orderedTimelineIds(document).map(id=>document.timelines[id]!):[];
   const selectedItem=selected?.kind==='item'?document?.items[selected.id]:undefined;
-  const selectedTimelineId=selectedItem?.timelineId ?? (selected?.kind==='timeline'?selected.id:undefined);
-  const selectedType=declarationForTimeline(models,document?.timelines[selectedTimelineId ?? '']);
-  const preferredTimelineId=selectedType?.capabilities.generation||selectedType?.capabilities.mediaPlacement?selectedTimelineId:undefined;
-  const previewItem=document?itemAtPlaybackTime(document,playheadMs,preferredTimelineId):undefined;
-  const selectedAsset=previewItem?.outputAssetId?document?.assets[previewItem.outputAssetId]:undefined;
-  const previewSeconds=previewItem?sourcePlaybackSeconds(previewItem,document?.timelines[previewItem.timelineId]?.ticksPerSecond ?? 1000,playheadMs):undefined;
+  const compositionPlan=useMemo(()=>document?buildCompositionPlan(document):undefined,[document]);
+  const activeLayers=compositionPlan?activeCompositionLayers(compositionPlan,Math.round(playheadMs*compositionPlan.fps/1000)):[];
+  const selectedAsset=activeLayers.length===1?document?.assets[activeLayers[0]!.assetId]:undefined;
+  const foregroundLayer=activeLayers.find(layer=>layer.kind!=='audio')??activeLayers[0];
+  const previewItem=foregroundLayer?document?.items[foregroundLayer.itemId]:undefined;
+  const viewerDetailItem=previewItem;
   const latestJob=(itemId:string)=>jobs.filter(job=>job.request.targetItemId===itemId).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0];
   const selectedJob=selectedItem?latestJob(selectedItem.id):undefined;
   const allAssets=Object.values(document?.assets ?? {}).filter(asset=>asset.metadata.librarySaved===true);
@@ -262,6 +270,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
     });
   }
   function objectKeys(event:KeyboardEvent,object:ObjectRef,scopeId?:string) {
+    if(event.target!==event.currentTarget)return;
     if(event.key==='Enter'){event.preventDefault();open(object,scopeId);}
     if(event.key==='ContextMenu'||(event.key==='F10'&&event.shiftKey)){
       event.preventDefault();const box=event.currentTarget.getBoundingClientRect();contextAt(box.left+24,box.top+24,object,scopeId);
@@ -354,6 +363,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   }
   function projectDragOver(event:DragEvent) {
     if(!externalFiles(event))return;
+    if(event.target instanceof HTMLInputElement&&event.target.type==='file'&&!event.target.disabled&&current&&host.navigator.isInteractive(current.scopeId))return;
     event.preventDefault();event.stopPropagation();
     const kind=fileHoverKind(event);
     const target=kind?externalMediaTarget(event):undefined;
@@ -362,6 +372,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   }
   async function projectDrop(event:DragEvent) {
     if(!externalFiles(event))return;
+    if(event.target instanceof HTMLInputElement&&event.target.type==='file'&&!event.target.disabled&&current&&host.navigator.isInteractive(current.scopeId))return;
     event.preventDefault();event.stopPropagation();setMenu(undefined);
     if(!host.navigator.isInteractive(undefined)||pending>0){setFeedback({text:'请先完成当前编辑再拖入文件',error:true});return;}
     const files=Array.from(event.dataTransfer.files);
@@ -466,6 +477,26 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   function hasReferenceContext(item:DeepReadonly<TimelineItemData>,model:TimelineDeclaration|undefined,scopeId?:string) {
     return Boolean(model?.capabilities.references && model.maxReferences>0 && (item.referenceAssetIds.length>0 || canReferenceDrop(item.id,scopeId)));
   }
+  async function uploadReference(file:File,itemId:string,scopeId:string) {
+    const latest=store.getSnapshot();if(!latest||!live.current||!host.navigator.isInteractive(scopeId))return;
+    const item=latest.document.items[itemId];
+    const declaration=declarationForTimeline(models,latest.document.timelines[item?.timelineId??'']);
+    const maxBytes=Math.min(declaration?.referenceMaxBytes??256*1024*1024,256*1024*1024);
+    if(!file.size||file.size>maxBytes){setFeedback({text:`参考文件需要有有效内容，单文件最多 ${maxBytes/1024/1024} MiB`,error:true});return;}
+    setPending(value=>value+1);
+    try{
+      const result=await bridge.referenceMediaFile(file,latest,crypto.randomUUID(),itemId);
+      if(!live.current)return;await store.refresh();if(!live.current)return;
+      setFeedback({text:result.ok?`已添加参考 ${file.name}`:result.error.message,error:!result.ok});
+    }catch{if(live.current)setFeedback({text:'参考文件上传未完成，请检查格式与本地服务',error:true});}
+    finally{if(live.current)setPending(value=>value-1);}
+  }
+  async function cloneVoice(file:File,name:string,requestId:string,timelineId:string,scopeId:string):Promise<VoiceSummary> {
+    const latest=store.getSnapshot();if(!latest||!live.current||!host.navigator.isInteractive(scopeId))throw new Error('当前时间线已关闭');
+    const voice=await bridge.cloneVoice(file,name,latest,requestId,timelineId);
+    if(live.current&&host.navigator.isInteractive(scopeId)){setVoiceRefresh(value=>value+1);setFeedback({text:`声纹已创建，声音 ID：${voice.voiceId}`,error:false});}
+    return voice;
+  }
 
   function library() {
     if(!document)return null;
@@ -477,14 +508,14 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
         event.dataTransfer.dropEffect=host.navigator.isInteractive(undefined)&&(!kind||(context&&host.drag.hover(context).status==='available'))?'copy':'none';
       }else dragOver(event,{role:'asset-library',object:projectRef,data:{}});}}
       onDrop={event=>{if(externalFiles(event))void importFiles(event);else drop(event,{role:'asset-library',object:projectRef,data:{}});}}>
-      {allAssets.length?<div className="asset-grid">{allAssets.map(asset=>{
+      <AssetGroups assets={allAssets} groups={document.assetGroups ?? {}} disabled={pending>0} onAction={(type,payload)=>execute(type,payload)} renderAsset={asset=>{
         const object:ObjectRef={kind:'asset',projectId:projectId,id:asset.id};
         return <div key={asset.id} className="asset-card" data-testid="asset-card" data-asset-id={asset.id} tabIndex={0} role="group" draggable aria-label={String(asset.metadata.name ?? '素材')}
           onDoubleClick={()=>open(object)} onKeyDown={event=>objectKeys(event,object)} onContextMenu={event=>context(event,object)}
           onDragStart={event=>beginDrag(event,{role:'asset',payload:{object:{kind:'asset',projectId:projectId,id:asset.id}}})}>
           <div className="asset-card__preview"><MediaPreview asset={asset}/></div><p>{String(asset.metadata.name ?? '素材')}</p>
         </div>;
-      })}</div>:<div className="library-empty"><p className="pixel-description">拖入素材</p></div>}
+      }}/>
     </div>;
   }
 
@@ -542,23 +573,26 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
     return <div className="details-stack" onContextMenu={event=>context(event,object as ObjectRef,scope)}>
       {!nestedPath.length && <>
         <div className="detail-summary"><PixelBadge tone="green">{shortModel(model)}</PixelBadge><span className="pixel-description">{item?'片段参数':model.capabilities.generation?'时间线默认配置':'时间线详情'}</span></div>
+        {model.capabilities.generation&&<InputCapabilities declaration={model} params={item?item.params:defaults} used={item?.referenceAssetIds.length}/>}
       </>}
       {visibleFields.filter(field=>!field.visibleWhen||JSON.stringify(values[field.visibleWhen.field])===JSON.stringify(field.visibleWhen.equals)).map(field=>{
         const fieldPath=[...prefix,field.key];
         const value=atPath(values,fieldPath);
-        return <FieldEditor key={`${scope}:${field.key}`} field={field} value={editingDefaults&&value===undefined?defaultFromSchema(schemaAtPath(schema,fieldPath)):value} schema={schemaAtPath(schema,fieldPath)} disabled={pending>0}
+        return <FieldEditor key={`${scope}:${field.key}`} field={field} value={editingDefaults&&value===undefined?defaultFromSchema(schemaAtPath(schema,fieldPath)):value} schema={schemaAtPath(schema,fieldPath)} disabled={pending>0} choicesRefresh={voiceRefresh}
           onCommit={value=>commit(withPath(values,fieldPath,value))} onOpen={()=>openField(fieldPath)}/>;
       })}
       {!visibleFields.length && (item||storedPath.length>0||!model.capabilities.generation) && <PixelEmpty title="无需额外设置" description={model.capabilities.generation?'模型使用时间线的默认设置':model.description}/>}
       {!item&&!storedPath.length&&model.capabilities.generation&&<>
         <p className="pixel-description">修改只用于新建片段；右键时间轴左侧选择“刷新时间轴默认配置”可应用到已有片段。</p>
-        {model.defaultFields.filter(field=>!field.visibleWhen||JSON.stringify(defaults[field.visibleWhen.field])===JSON.stringify(field.visibleWhen.equals)).map(field=><FieldEditor key={`${scope}:default:${field.key}`} field={field} value={defaults[field.key]} schema={schemaAtPath(model.paramsJsonSchema,[field.key])} disabled={pending>0}
+        {model.fields.some(field=>field.choicesSource?.kind==='providerVoice')&&<VoiceCloneForm key={`${scope}:clone`} disabled={pending>0} onClone={(file,name,requestId)=>cloneVoice(file,name,requestId,timeline.id,scope)}/>}
+        {model.defaultFields.filter(field=>!field.visibleWhen||JSON.stringify(defaults[field.visibleWhen.field])===JSON.stringify(field.visibleWhen.equals)).map(field=><FieldEditor key={`${scope}:default:${field.key}`} field={field} value={defaults[field.key]} schema={schemaAtPath(model.paramsJsonSchema,[field.key])} disabled={pending>0} choicesRefresh={voiceRefresh}
           onCommit={value=>commitDefault([field.key],value)} onOpen={()=>open(object as ObjectRef,scope,['itemDefaults',field.key])}/>)}
       </>}
       {item && !nestedPath.length && <>
-        {hasReferenceContext(item,model,scope)&&<div className={`reference-zone ${canReferenceDrop(item.id,scope)?'reference-zone--active':''}`} data-testid="item-reference"
+        {model.capabilities.references&&model.maxReferences>0&&<div className={`reference-zone ${canReferenceDrop(item.id,scope)?'reference-zone--active':''}`} data-testid="item-reference"
           onDragOver={event=>dragOver(event,refTarget(item.id),scope)} onDrop={event=>drop(event,refTarget(item.id),scope)}>
           <span className="pixel-title"><PixelIcon name="reference"/> 参考素材</span>
+          <ReferenceUpload key={`${scope}:${item.id}`} declaration={model} item={item} disabled={pending>0} onUpload={file=>uploadReference(file,item.id,scope)}/>
           {item.referenceAssetIds.map(id=>{const asset=document.assets[id];return asset?<div key={id} className="reference-card" tabIndex={0} onDoubleClick={()=>open({kind:'asset',projectId:projectId,id},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',projectId:projectId,id},scope)} onContextMenu={event=>context(event,{kind:'asset',projectId:projectId,id},scope)}><MediaPreview asset={asset}/><span>{String(asset.metadata.name ?? '参考图像')}</span></div>:null;})}
         </div>}
         {item.outputAssetId && <div className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'asset',id:item.outputAssetId!,projectId:projectId},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',id:item.outputAssetId!,projectId:projectId},scope)}><PixelIcon name="image"/>{model.capabilities.generation?'生成输出':'输出媒体'}<span><PixelIcon name="chevron"/></span></div>}
@@ -596,10 +630,10 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
       
       <div className="upper-workspace">
         <PixelPanel className="viewer-panel">
-          <div className="viewer-canvas" data-testid="viewer" tabIndex={0} role="group" aria-label="作品预览" onDoubleClick={()=>{if(selectedAsset)open({kind:'asset',projectId:projectId,id:selectedAsset.id});}}
+          <div className="viewer-canvas" data-testid="viewer" tabIndex={0} role="group" aria-label="作品预览" onDoubleClick={()=>{if(viewerDetailItem)open({kind:'item',projectId:projectId,id:viewerDetailItem.id});}}
             onContextMenu={event=>{event.preventDefault();event.stopPropagation();viewerMenuAt(event.clientX,event.clientY);}}
             onKeyDown={event=>{
-              if(event.key==='Enter'&&selectedAsset){event.preventDefault();open({kind:'asset',projectId:projectId,id:selectedAsset.id});}
+              if(event.key==='Enter'&&viewerDetailItem){event.preventDefault();open({kind:'item',projectId:projectId,id:viewerDetailItem.id});}
               else if(event.key==='ContextMenu'||(event.key==='F10'&&event.shiftKey)){event.preventDefault();event.stopPropagation();const box=event.currentTarget.getBoundingClientRect();viewerMenuAt(box.left+24,box.top+24);}
             }}
             draggable={Boolean(selectedAsset&&(!desktop||exportTicket?.assetId===selectedAsset.id))} onDragStart={event=>{
@@ -608,7 +642,8 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
               event.dataTransfer.setData('DownloadURL',`${String(selectedAsset.metadata.mimeType)}:pixel-${selectedAsset.id}.${String(selectedAsset.metadata.extension ?? 'bin')}:${location.origin}${assetUrl(selectedAsset.id)}`);
               event.dataTransfer.setData('text/uri-list',`${location.origin}${assetUrl(selectedAsset.id)}`);
             }}>
-            {selectedAsset?<MediaPreview key={selectedAsset.id} asset={selectedAsset} large seekSeconds={previewSeconds} scrubbing={scrubbing}/>:<span className="viewer-empty pixel-description">暂无输出</span>}
+            {snapshot&&Boolean(compositionPlan?.layers.length)&&<CompositionPreview snapshot={snapshot} playheadMs={playheadMs} onSeek={milliseconds=>setPlayheadMs(clampPlaybackMs(milliseconds,maximumPlaybackMs))}/>}
+            {!activeLayers.length&&<span className={`viewer-empty pixel-description ${compositionPlan?.layers.length?'viewer-empty--composition':''}`}>暂无输出</span>}
             {selectedAsset&&desktop&&exportTicket?.assetId!==selectedAsset.id&&<span className="viewer-preparing" role="status">正在准备输出…</span>}
           </div>
           {previewItem&&<div className="viewer-meta"><span className="viewer-time">{playbackTimeLabel(playheadMs)}</span><span className="viewer-selection">{itemTitle(previewItem)}</span><span>{time(previewItem.durationTicks/(document?.timelines[previewItem.timelineId]?.ticksPerSecond ?? 1000))}</span></div>}
@@ -620,11 +655,11 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
           <div className="timeline-content" style={{minWidth:trackWidth+196}}>
             <div className={`timeline-playhead ${scrubbing?'timeline-playhead--scrubbing':''}`} data-testid="timeline-playhead" aria-hidden="true" style={{left:196+playheadMs/1000*PX_PER_SECOND}}><div className="timeline-playhead-handle" data-testid="timeline-playhead-handle" onPointerDown={scrubBegin}/></div>
             <div className="timeline-ruler"><div className="timeline-label timeline-label--ruler"><span className="ruler-time" data-testid="timeline-current-time">{playbackTimeLabel(playheadMs)}</span><PixelIcon name="timeline"/></div><div ref={rulerRef} className="ruler-track" data-testid="timeline-ruler" style={{width:trackWidth}} tabIndex={0} role="slider" aria-label="播放位置" aria-valuemin={0} aria-valuemax={maximumPlaybackMs} aria-valuenow={playheadMs} aria-valuetext={playbackTimeLabel(playheadMs)} aria-disabled={Boolean(current)} onPointerDown={scrubBegin} onKeyDown={playbackKeys}>{Array.from({length:Math.ceil(seconds/4)+1},(_,i)=><span key={i} style={{left:i*4*PX_PER_SECOND}}>{time(i*4)}</span>)}</div></div>
-            {timelines.map((timeline,index)=>{
+            <TimelineSortHost ids={timelines.map(timeline=>timeline.id)} disabled={pending>0||!host.navigator.isInteractive(undefined)} onMove={(id,beforeId)=>{void execute('timeline.reorder',{timelineId:id,...(beforeId?{beforeTimelineId:beforeId}:{})});}}>{timelines.map((timeline,index)=>{
               const model=declarationForTimeline(models,timeline);const kind=model?.outputKind ?? 'text';const obj:ObjectRef={kind:'timeline',projectId:projectId,id:timeline.id};
-              return <div key={timeline.id} className="timeline-row" data-testid="timeline-row" data-timeline-id={timeline.id}>
+              return <SortableTimelineRow key={timeline.id} id={timeline.id} title={shortModel(model)} disabled={pending>0||!host.navigator.isInteractive(undefined)} className="timeline-row" data-testid="timeline-row" data-timeline-id={timeline.id}>{handle=><>
                 <div className="timeline-label" data-testid="timeline-label" tabIndex={0} role="group" aria-label={`${shortModel(model)}${model?.capabilities.generation?'时间线默认配置':'时间线详情'}`} onClick={()=>{if(host.navigator.isInteractive(undefined)){setSelected(obj);open(obj);}}} onKeyDown={event=>objectKeys(event,obj)} onContextMenu={event=>context(event,obj)}>
-                  <div className={`track-icon track-icon--${kind}`}>{kind==='video'?'V':kind==='image'?'I':kind==='audio'?'A':'T'}{index+1}</div><strong>{shortModel(model)}</strong>
+                  <div className={`track-icon track-icon--${kind}`}>{kind==='video'?'V':kind==='image'?'I':kind==='audio'?'A':'T'}{index+1}</div><strong>{shortModel(model)}</strong>{handle}
                 </div>
                 <div className="timeline-track" data-testid="timeline-track" style={{width:trackWidth}} onContextMenu={event=>context(event,obj,undefined,false,{role:'timeline.position',startTick:positionTick(event.clientX,event.currentTarget.getBoundingClientRect().left,timeline.ticksPerSecond)})} onDragOver={event=>dragOver(event,targetAt(event,timeline.id))} onDrop={event=>drop(event,targetAt(event,timeline.id))} onDragLeave={()=>setDropHint(undefined)}>
                   {timeline.itemIds.map(id=>{const item=document!.items[id];if(!item)return null;const view=resize?.id===id?resize:item;const job=latestJob(id);const ref:ObjectRef={kind:'item',projectId:projectId,id};
@@ -640,8 +675,8 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
                   })}
                   {dropHint?.id===timeline.id&&<div className={`drop-marker ${!dropHint.valid?'drop-marker--invalid':''}`} style={{left:dropHint.tick/timeline.ticksPerSecond*PX_PER_SECOND}}/>}
                 </div>
-              </div>;
-            })}
+              </>}</SortableTimelineRow>;
+            })}</TimelineSortHost>
             
           </div>
         </div>
@@ -652,6 +687,34 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
     {!desktop&&modal}
     {menu&&<PixelContextMenu key={menu.items[0]?.id} x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(undefined)}/>}
   </PixelWindowHost>;
+}
+
+const referenceKindTitle=(kind:MediaKind)=>kind==='image'?'图片':kind==='video'?'视频':'音频';
+const referenceFormats:Record<MediaKind,{label:string;accept:string[]}>= {
+  image:{label:'PNG、JPEG、WebP',accept:['.png','.jpg','.jpeg','.webp','image/png','image/jpeg','image/webp']},
+  audio:{label:'MP3、WAV',accept:['.mp3','.wav','audio/mpeg','audio/wav']},
+  video:{label:'MP4',accept:['.mp4','video/mp4']},
+};
+function InputCapabilities({declaration,params,used}:{declaration:TimelineDeclaration;params:DeepReadonly<JsonObject>;used?:number|undefined}) {
+  const textFields=declaration.fields.filter(field=>declaration.referenceTextFields.includes(field.key)).map(field=>`${fieldLabel(field)}${declaration.requiredTextFields?.includes(field.key)?'（必填）':''}`);
+  const maximum=referenceLimit(declaration,params);const minimum=referenceMinimum(declaration,params);
+  return <div className="input-capabilities" data-testid="input-capabilities">
+    <span className="pixel-description">文字输入：{textFields.length?textFields.join('、'):'使用模型声明的参数'}</span>
+    <span className="pixel-description">{declaration.capabilities.references&&maximum>0?`文件参考：${declaration.referenceKinds.map(kind=>`${referenceKindTitle(kind)}（${referenceFormats[kind].label}）`).join(' / ')}，${minimum===maximum?`需要 ${minimum} 个`:minimum?`需要 ${minimum} 至 ${maximum} 个`:`最多 ${maximum} 个`}${used===undefined?'':`，已用 ${used} / ${maximum}`}`:'不接受文件参考'}</span>
+    {declaration.capabilities.references&&declaration.referenceMaxBytes!==undefined&&<span className="pixel-description">单文件最多 {declaration.referenceMaxBytes/1024/1024} MiB。</span>}
+  </div>;
+}
+
+function ReferenceUpload({declaration,item,disabled,onUpload}:{declaration:TimelineDeclaration;item:DeepReadonly<TimelineItemData>;disabled:boolean;onUpload:(file:File)=>Promise<void>}) {
+  const input=useRef<HTMLInputElement>(null);
+  const maximum=referenceLimit(declaration,item.params);const full=item.referenceAssetIds.length>=maximum;
+  const accepts=declaration.referenceKinds.flatMap(kind=>referenceFormats[kind].accept).join(',');
+  return <div className="reference-upload">
+    <button type="button" className="detail-action" disabled={disabled||full} onClick={()=>input.current?.click()}>上传参考{declaration.referenceKinds.length===1?referenceKindTitle(declaration.referenceKinds[0]!):'文件'}</button>
+    <input ref={input} type="file" aria-label="参考文件" accept={accepts} hidden disabled={disabled||full} onChange={event=>{const file=event.target.files?.[0];event.target.value='';if(file)void onUpload(file);}}/>
+    <span className="pixel-description">已用 {item.referenceAssetIds.length} / {maximum}{full?'，已达到当前参考上限':''}</span>
+    <span className="pixel-description">每次上传一个文件。</span>
+  </div>;
 }
 
 function WindowControls({browserClose}:{browserClose?:(()=>void)|undefined}={}) {

@@ -1,6 +1,7 @@
 import type { ActionEnvelope, ActionResult, DeepReadonly, GenerationJob, ProjectChanged, ProjectSnapshot, Unsubscribe } from '../src/contracts.js';
 import type { DesktopBridge } from '../src/frontend.js';
 import type { TimelineDeclaration } from '../src/timeline-catalog.js';
+import type { VoicePage, VoiceSummary } from '../src/voice-contracts.js';
 
 /** A project host owns one origin and one read-only projection identity. */
 export interface ProjectSessionDescriptor { projectId: string; sessionId: string }
@@ -8,10 +9,14 @@ export interface ProjectSessionDescriptor { projectId: string; sessionId: string
 /** File metadata only routes the gesture; the backend verifies the actual bytes. */
 export function mediaMimeType(file: File): string {
   const declared = file.type.toLowerCase();
-  if (declared === 'audio/x-wav') return 'audio/wav';
+  if (declared === 'audio/x-wav' || declared === 'audio/wave') return 'audio/wav';
   if (declared && declared !== 'application/octet-stream') return declared;
   const extension = file.name.split('.').at(-1)?.toLowerCase() ?? '';
   return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', mp3: 'audio/mpeg', wav: 'audio/wav', mp4: 'video/mp4' } as Record<string, string>)[extension] ?? 'application/octet-stream';
+}
+
+export async function readVoices(query: {category:'default'|'cloned';search?:string;cursor?:string},signal?:AbortSignal):Promise<VoicePage> {
+  return readJson(`/api/voices?${new URLSearchParams({limit:'20',...query})}`,signal);
 }
 
 export async function readJson<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -91,6 +96,24 @@ export class HttpDesktopBridge implements DesktopBridge {
     const result = await response.json() as ActionResult;
     if (!response.ok && result.ok !== false) throw new Error('媒体放置服务暂不可用');
     return result;
+  }
+  async referenceMediaFile(file:File,snapshot:DeepReadonly<ProjectSnapshot>,requestId:string,itemId:string):Promise<ActionResult> {
+    const response=await fetch('/api/media-reference',{method:'POST',headers:{
+      'Content-Type':mediaMimeType(file),'X-Pixel-Name':encodeURIComponent(file.name),
+      'X-Pixel-Project-Id':snapshot.document.id,'X-Pixel-Revision':String(snapshot.revision),'X-Pixel-Request-Id':requestId,'X-Pixel-Item-Id':itemId,
+    },body:file});
+    const result=await response.json() as ActionResult;
+    if(!response.ok&&result.ok!==false)throw new Error('参考文件上传服务暂不可用');
+    return result;
+  }
+  async cloneVoice(file:File,name:string,snapshot:DeepReadonly<ProjectSnapshot>,requestId:string,timelineId:string):Promise<VoiceSummary> {
+    const response=await fetch('/api/voice-clone',{method:'POST',headers:{
+      'Content-Type':mediaMimeType(file),'X-Pixel-Name':encodeURIComponent(file.name),'X-Pixel-Voice-Name':encodeURIComponent(name),
+      'X-Pixel-Project-Id':snapshot.document.id,'X-Pixel-Revision':String(snapshot.revision),'X-Pixel-Request-Id':requestId,'X-Pixel-Timeline-Id':timelineId,
+    },body:file});
+    const result=await response.json() as {voice?:VoiceSummary;error?:{message?:string}};
+    if(!response.ok||!result.voice)throw new Error(result.error?.message||'声纹克隆未完成');
+    return result.voice;
   }
 }
 

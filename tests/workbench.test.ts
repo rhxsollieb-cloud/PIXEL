@@ -32,8 +32,8 @@ async function envelope(workbench: Workbench, type: string, payload: ActionEnvel
   return { requestId: randomUUID(), projectId: WORKBENCH_PROJECT_ID, expectedRevision: snapshot.revision, type, payload };
 }
 async function action(workbench: Workbench, type: string, payload: ActionEnvelope['payload']) { return workbench.execute(await envelope(workbench, type, payload)); }
-async function waitUntil(predicate: () => Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 5000;
+async function waitUntil(predicate: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!(await predicate())) { if (Date.now() > deadline) throw new Error('Wait timed out'); await new Promise(accept => setTimeout(accept, 15)); }
 }
 class MockImageProvider extends BaseModelProvider {
@@ -344,7 +344,9 @@ test('trusted parent IPC closes the Windows-compatible local host cleanly withou
   child.on('message', message => { if (message && typeof message === 'object' && 'type' in message && message.type === 'pixel.closed') acknowledged = true; });
   child.on('exit', code => { exited = true; exitCode = code; });
   context.after(() => { if (!exited) child.kill(); });
-  await waitUntil(async () => output.includes('本地宿主已启动'));
+  // A cold TS/SDK child can start more slowly while the full suite compiles on Windows.
+  // Keep the independent shutdown deadline strict; fail immediately on an early child exit.
+  await waitUntil(async () => { assert.equal(exited, false, `Host exited before readiness (${exitCode})`); return output.includes('本地宿主已启动'); }, 15_000);
   assert.equal((await fetch(`http://127.0.0.1:${apiPort}/api/status`)).status, 200);
   child.send({ type: 'pixel.shutdown' });
   await waitUntil(async () => exited);
