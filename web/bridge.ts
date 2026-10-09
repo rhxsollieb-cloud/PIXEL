@@ -106,6 +106,16 @@ export class HttpDesktopBridge implements DesktopBridge {
     if(!response.ok&&result.ok!==false)throw new Error('参考文件上传服务暂不可用');
     return result;
   }
+  async importOutputFile(file:File,snapshot:DeepReadonly<ProjectSnapshot>,requestId:string,itemId:string,provenance:'manual'|'external'):Promise<ActionResult> {
+    const response=await fetch('/api/media-output',{method:'POST',headers:{
+      'Content-Type':mediaMimeType(file),'X-Pixel-Name':encodeURIComponent(file.name),
+      'X-Pixel-Project-Id':snapshot.document.id,'X-Pixel-Revision':String(snapshot.revision),'X-Pixel-Request-Id':requestId,
+      'X-Pixel-Item-Id':itemId,'X-Pixel-Output-Provenance':provenance,
+    },body:file});
+    const result=await response.json() as ActionResult;
+    if(!response.ok&&result.ok!==false)throw new Error('生成结果上传服务暂不可用');
+    return result;
+  }
   async cloneVoice(file:File,name:string,snapshot:DeepReadonly<ProjectSnapshot>,requestId:string,timelineId:string):Promise<VoiceSummary> {
     const response=await fetch('/api/voice-clone',{method:'POST',headers:{
       'Content-Type':mediaMimeType(file),'X-Pixel-Name':encodeURIComponent(file.name),'X-Pixel-Voice-Name':encodeURIComponent(name),

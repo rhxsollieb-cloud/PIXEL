@@ -6,6 +6,7 @@ import { assertProjectInvariants, DomainError, type HistoryEntry } from './backe
 import { assetGroupsSchema, generationRequestSchema, timelineOrderSchema, type ActionReceipt, type AssetData, type GenerationRequest, type ProjectDocument, type ProjectSnapshot } from './contracts.js';
 import { modelRegistry } from './models.js';
 import { referenceLimit, timelineRegistry } from './timeline-catalog.js';
+import type { MediaArtifactStore } from './generation.js';
 
 export interface WorkbenchOutboxEntry {
   id: string;
@@ -40,7 +41,7 @@ const itemSchema = z.strictObject({
   id, timelineId: id, kind: id, startTick: tick, durationTicks: z.number().int().positive().safe(),
   sourceOffsetTicks: tick, params: json, generationSettings: json.optional(),
   referenceAssetIds: z.array(z.uuid()), outputAssetId: z.uuid().optional(),
-  outputOrigin: z.enum(['placement', 'generated']).optional(), generationToken: id,
+  outputOrigin: z.enum(['placement', 'generated', 'manual']).optional(), generationToken: id,
 });
 const documentSchema = z.strictObject({
   schemaVersion: z.literal(1), id, title: z.string().min(1).max(200),
@@ -118,7 +119,8 @@ function validateDocument(document: ProjectDocument): void {
       if (!declaration.capabilities.mediaPlacement && item.sourceOffsetTicks !== 0) throw new DomainError('INVALID_INPUT', '此时间线不支持媒体偏移');
       if (item.referenceAssetIds.length > referenceLimit(declaration, item.params) || item.referenceAssetIds.some(id => !declaration.referenceKinds.includes(document.assets[id]!.kind))) throw new DomainError('INVALID_INPUT', '素材引用不符合时间线语义');
       if (item.outputAssetId !== undefined && (!declaration.capabilities.mediaPlacement || document.assets[item.outputAssetId]!.kind !== declaration.outputKind)) throw new DomainError('INVALID_INPUT', '输出媒体不符合时间线语义');
-      if (declaration.mode === 'local' && (item.outputOrigin === 'generated' || item.generationSettings !== undefined)) throw new DomainError('INVALID_INPUT', '本地时间线不能保存生成配置或生成输出');
+      if (declaration.mode === 'local' && (item.outputOrigin === 'generated' || item.outputOrigin === 'manual' || item.generationSettings !== undefined)) throw new DomainError('INVALID_INPUT', '本地时间线不能保存生成配置或生成输出');
+      if (item.outputOrigin === 'manual' && (item.outputAssetId === undefined || !declaration.capabilities.manualOutput)) throw new DomainError('INVALID_INPUT', '人工输出必须属于支持上传结果的生成片段');
       if (declaration.mode === 'local' && declaration.capabilities.mediaPlacement && (item.outputAssetId === undefined || item.outputOrigin !== 'placement')) throw new DomainError('INVALID_INPUT', '普通媒体片段必须关联真实放置的素材');
       if (plugin.manifest.overlapPolicy === 'reject' && item.startTick < end) throw new DomainError('INVALID_INPUT', '项目时间线包含重叠片段');
       end = item.startTick + item.durationTicks;
@@ -153,14 +155,20 @@ export function validateWorkbenchProjectFile(input: unknown): WorkbenchProjectFi
   }
 }
 
-export async function readWorkbenchProjectFile(directory: string, options: { externalOpen?: boolean } = {}): Promise<WorkbenchProjectFile> {
+export async function readWorkbenchProjectMetadata(directory: string): Promise<WorkbenchProjectFile> {
+  const root = await realpath(resolve(directory));
+  return validateWorkbenchProjectFile(await readJson(root, join(root, 'project.json')));
+}
+
+export async function readWorkbenchProjectFile(directory: string, options: { externalOpen?: boolean; mediaStore?: MediaArtifactStore; validateResources?: boolean } = {}): Promise<WorkbenchProjectFile> {
   const root = await realpath(resolve(directory));
   const file = validateWorkbenchProjectFile(await readJson(root, join(root, 'project.json')));
   if (options.externalOpen && file.outbox.some(entry => !entry.done)) throw new DomainError('NOT_APPLICABLE', '项目仍有待处理的生成任务，请先在原会话完成或取消；原文件已保留');
   const assets = new Map<string, AssetData>();
   for (const asset of Object.values(file.snapshot.document.assets)) assets.set(asset.id, asset);
+  for (const entry of file.history) for (const document of [entry.before, entry.after]) for (const asset of Object.values(document.assets)) assets.set(asset.id, asset);
   for (const entry of file.outbox) for (const asset of entry.request?.references ?? []) assets.set(asset.id, asset);
-  for (const asset of assets.values()) await validateAssetFiles(root, asset);
+  if (options.validateResources !== false) for (const asset of assets.values()) await validateAssetFiles(root, asset, options.mediaStore);
   const jobsDirectory = join(root, 'jobs');
   let jobFiles: string[];
   try {
@@ -180,12 +188,13 @@ export async function readWorkbenchProjectFile(directory: string, options: { ext
       modelRegistry.prepareRequest(job.request as GenerationRequest);
       for (const reference of job.request.references) {
         const asset = assetSchema.parse({ id: reference.id, kind: reference.kind, fileRef: reference.fileRef, metadata: reference.metadata });
-        await validateAssetFiles(root, asset);
+        if (options.validateResources !== false) await validateAssetFiles(root, asset, options.mediaStore);
       }
       for (const artifactId of job.artifactIds) {
-        const artifact = artifactSchema.parse(await readJson(root, join(root, 'artifacts', `${artifactId}.json`)));
+        if (options.validateResources === false) continue;
+        const artifact = artifactSchema.parse(options.mediaStore ? await options.mediaStore.get(artifactId) : await readJson(root, join(root, 'artifacts', `${artifactId}.json`)));
         if (artifact.id !== artifactId || artifact.jobId !== job.id) throw new DomainError('INVALID_INPUT', '任务产物归属无效');
-        await validateAssetFiles(root, artifact.asset);
+        await validateAssetFiles(root, artifact.asset, options.mediaStore);
       }
     } catch (error) {
       if (error instanceof DomainError) throw error;
@@ -195,8 +204,15 @@ export async function readWorkbenchProjectFile(directory: string, options: { ext
   return file;
 }
 
-async function validateAssetFiles(root: string, asset: AssetData): Promise<void> {
+async function validateAssetFiles(root: string, asset: AssetData, mediaStore?: MediaArtifactStore): Promise<void> {
   try {
+    if (mediaStore) {
+      const artifact = await mediaStore.get(asset.id);
+      if (!artifact || artifact.asset.id !== asset.id || artifact.asset.kind !== asset.kind || artifact.asset.fileRef !== asset.fileRef) throw new DomainError('INVALID_INPUT', '共享素材索引与项目句柄不一致');
+      const info = await mediaStore.stat(asset);
+      if (info.byteLength <= 0 || info.mimeType !== asset.metadata.mimeType || (typeof asset.metadata.byteLength === 'number' && asset.metadata.byteLength !== info.byteLength)) throw new DomainError('INVALID_INPUT', '共享素材格式或大小与项目不一致');
+      return;
+    }
     const artifact = artifactSchema.parse(await readJson(root, join(root, 'artifacts', `${asset.id}.json`)));
     if (artifact.id !== asset.id || artifact.asset.id !== asset.id || artifact.asset.kind !== asset.kind || artifact.asset.fileRef !== asset.fileRef) throw new DomainError('INVALID_INPUT', '素材索引与句柄不一致');
     const mimeType = artifact.asset.metadata.mimeType;
@@ -220,7 +236,7 @@ export interface PixelProjectLocation {
 }
 
 /** A trusted desktop drop adapter supplies the path. No arbitrary JSON or file is converted in place. */
-export async function preparePixelProjectLocation(targetPath: string): Promise<PixelProjectLocation> {
+export async function preparePixelProjectLocation(targetPath: string, options: { mediaStore?: MediaArtifactStore } = {}): Promise<PixelProjectLocation> {
   if (!isAbsolute(targetPath) || targetPath.includes('\0')) throw new DomainError('INVALID_INPUT', '项目位置必须是有效的本地绝对路径');
   let actual: string;
   try { actual = await realpath(targetPath); }
@@ -229,7 +245,7 @@ export async function preparePixelProjectLocation(targetPath: string): Promise<P
   const directory = info.isDirectory() ? actual : dirname(actual);
   if (!info.isDirectory() && (!info.isFile() || basename(actual).toLowerCase() !== 'project.json')) throw new DomainError('INVALID_INPUT', '请拖入 Pixel 项目目录、project.json，或用于新作品的空文件夹');
   try {
-    await readWorkbenchProjectFile(directory, { externalOpen: true });
+    await readWorkbenchProjectFile(directory, { externalOpen: true, ...options });
     return { directory, existing: true };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

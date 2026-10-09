@@ -2,7 +2,7 @@ import type { AssetData, DeepReadonly } from '../src/contracts.js';
 
 export interface ExportWorkbench {
   mediaAsset(assetId: string): Promise<AssetData>;
-  artifacts: { resolvePath(asset: DeepReadonly<AssetData>): Promise<string> };
+  prepareMediaExport(assetId: string): Promise<string>;
 }
 
 export class ExportTickets {

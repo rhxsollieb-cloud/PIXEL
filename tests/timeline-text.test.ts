@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { createWorkbench, type Workbench } from '../src/workbench.js';
+import { createWorkbench, type Workbench } from './local-workbench.js';
 import { createApiServer } from '../src/server.js';
 import { queryTimelineText, formatTimelineText, type TimelineTextPage } from '../src/timeline-text.js';
 import type { ActionResult } from '../src/contracts.js';

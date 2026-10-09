@@ -11,7 +11,7 @@ export class ExportTickets {
     if (!this.#active) throw new Error('Export session has closed');
     if (typeof assetId !== 'string' || !assetId || assetId.length > 200) throw new Error('Invalid export asset');
     const asset = await this.workbench.mediaAsset(assetId);
-    const path = await this.workbench.artifacts.resolvePath(asset);
+    const path = await this.workbench.prepareMediaExport(asset.id);
     const info = await lstat(path);
     if (!info.isFile() || !info.size) throw new Error('Export media is not ready');
     // Session replacement may revoke this instance while the filesystem awaits.

@@ -10,7 +10,7 @@ import type { ActionEnvelope, ActionResult, DeepReadonly, GenerationRequest } fr
 import { BaseModelProvider, waitForProvider, transitionJob, type ProviderRunContext } from '../src/generation.js';
 import { GenerationRunner, ProviderRegistry } from '../src/runtime.js';
 import { FileArtifactStore, FileJobRepository } from '../src/storage.js';
-import { createWorkbench, createInitialWorkbenchProject, captureGenerationRequest, WORKBENCH_PROJECT_ID, type Workbench } from '../src/workbench.js';
+import { createWorkbench, createInitialWorkbenchProject, captureGenerationRequest, WORKBENCH_PROJECT_ID, type Workbench } from './local-workbench.js';
 import { modelRegistry } from '../src/models.js';
 import { createApiServer } from '../src/server.js';
 import { createWorkbenchFixture } from './workbench-fixtures.js';
@@ -337,7 +337,7 @@ test('trusted parent IPC closes the Windows-compatible local host cleanly withou
   const address = probe.address(); assert.ok(address && typeof address === 'object');
   const apiPort = address.port;
   await new Promise<void>(accept => probe.close(() => accept()));
-  const child = spawn(process.execPath, ['--import', 'tsx', resolve('src/server.ts')], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: { ...process.env, PIXEL_STORAGE_DIR: root, PIXEL_API_PORT: String(apiPort), ELEVENLABS_API_KEY: '', OPENROUTER_API_KEY: '' } });
+  const child = spawn(process.execPath, ['--import', 'tsx', resolve('scripts/test-host.mjs')], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: { ...process.env, PIXEL_STORAGE_DIR: root, PIXEL_API_PORT: String(apiPort), ELEVENLABS_API_KEY: '', OPENROUTER_API_KEY: '' } });
   let output = ''; let acknowledged = false; let exited = false; let exitCode: number | null = null;
   child.stdout!.on('data', data => { output += data.toString(); });
   child.stderr!.on('data', data => { output += data.toString(); });

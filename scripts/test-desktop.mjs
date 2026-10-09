@@ -20,7 +20,7 @@ const diskImage = join(projectLocations, 'desktop-export.png');
 const screenshots = join(root, '.pixel', 'screenshots');
 const testEntry = join(root, '.pixel', 'native-test-entry.mjs');
 const envFor = directory => {
-  const env = { ...process.env, PIXEL_STORAGE_DIR: directory, PIXEL_TEST_APPDATA: join(directory, 'desktop-profile'), ELEVENLABS_API_KEY: '', OPENROUTER_API_KEY: '' };
+  const env = { ...process.env, NODE_ENV: 'test', PIXEL_STORAGE_DIR: directory, PIXEL_TEST_APPDATA: join(directory, 'desktop-profile'), ELEVENLABS_API_KEY: '', OPENROUTER_API_KEY: '' };
   delete env.ELECTRON_RUN_AS_NODE;
   return env;
 };
@@ -31,7 +31,7 @@ const executeAction = (page, type, payload) => page.evaluate(async ({type, paylo
 }, {type, payload});
 const launch = async directory => {
   await mkdir(join(directory, 'desktop-profile'), { recursive: true });
-  const application = await _electron.launch({ args: [testEntry], cwd: root, env: envFor(directory), timeout: 30000 });
+  const application = await _electron.launch({ args: [testEntry, '--pixel-test-storage'], cwd: root, env: envFor(directory), timeout: 30000 });
   application.process().stderr.on('data', bytes => process.stderr.write(bytes));
   application.context().setDefaultTimeout(15000);
   return application;
@@ -52,7 +52,14 @@ async function nativeWindowDrop(sourcePage, source, targetPage, target, x, expec
     assert.ok(token, 'A real mouse dragstart must put the opaque session in DataTransfer');
     if (expectedOffset !== undefined) assert.equal(await sourcePage.evaluate(token => window.pixelDesktop.resolveObjectDrag(token)?.offsetTicks, token), expectedOffset);
     await expect(target).toBeVisible();
+    // A detail section can exist below its scrollable viewport. Native CDP drops
+    // use viewport coordinates, so expose the actual target before dispatching.
+    await target.scrollIntoViewIfNeeded();
     const box = await target.boundingBox(); assert.ok(box);
+    assert.equal(await target.evaluate((element, point) => {
+      const hit = document.elementFromPoint(point.x, point.y);
+      return hit !== null && element.contains(hit);
+    }, {x:box.x+x,y:box.y+12}), true, 'The native drop point must hit the intended target inside its viewport');
     const before = await snapshot(targetPage);
     const unrelated = await targetPage.evaluateHandle(() => new DataTransfer());
     await target.dispatchEvent('drop', {dataTransfer:unrelated,clientX:box.x+x,clientY:box.y+12});
@@ -409,7 +416,8 @@ try {
   await workspace.evaluate(async ticket => { window.pixelDesktop.startExport(ticket); await window.pixelDesktop.isMaximized(); }, grant.ticket);
   const nativeDrags = await desktop.evaluate(() => globalThis.__pixelNativeDrags);
   assert.equal(nativeDrags.length, 1);
-  assert.ok(nativeDrags[0].file.startsWith(join(storage, 'artifacts')));
+  assert.equal(dirname(dirname(nativeDrags[0].file)), resolve(tmpdir()));
+  assert.ok(basename(dirname(nativeDrags[0].file)).startsWith('pixel-export-'));
   assert.equal((await readFile(nativeDrags[0].file)).subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
   await workspace.evaluate(async ticket => { window.pixelDesktop.startExport(ticket); await window.pixelDesktop.isMaximized(); }, grant.ticket);
   assert.equal(await desktop.evaluate(() => globalThis.__pixelNativeDrags.length), 1);
@@ -541,7 +549,8 @@ try {
   await expect(viewer.locator('img')).toHaveAttribute('src', `/api/media/${freshItem.outputAssetId}`);
   await mouseViewerExport(workspace, 4);
   const freshExport = await desktop.evaluate(() => globalThis.__pixelNativeDrags.at(-1));
-  assert.ok(freshExport.file.startsWith(join(droppedDirectory, 'artifacts')));
+  assert.equal(dirname(dirname(freshExport.file)), resolve(tmpdir()));
+  assert.ok(basename(dirname(freshExport.file)).startsWith('pixel-export-'));
   assert.deepEqual(await readFile(freshExport.file), await readFile(diskImage));
   const freshClosed = freshLibrary.waitForEvent('close');
   await nativeFileDrop(workspace, viewer, join(storage, 'project.json'));

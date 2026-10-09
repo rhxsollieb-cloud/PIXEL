@@ -9,17 +9,17 @@ import {
 } from './backend.js';
 import type {
   ActionEnvelope, ActionReceipt, ActionResult, AssetData, CallerContext, GenerationJob,
-  GenerationRequest, JsonObject, ProjectChanged, ProjectDocument, ProjectSnapshot, TimelineItemData,
+  GenerationRequest, GenerationArtifact, JsonObject, ProjectChanged, ProjectDocument, ProjectSnapshot, TimelineItemData,
 } from './contracts.js';
 import { assetGroupTitleSchema, orderedTimelineIds } from './contracts.js';
 import { modelRegistry, modelQuerySchema } from './models.js';
 import { referenceLimit, timelineRegistry, timelineTypeQuerySchema } from './timeline-catalog.js';
 import { referenceExceedsByteLimit } from './reference-policy.js';
 import { probeMediaDuration } from './media-metadata.js';
-import { ProviderError, transitionJob, type GenerationProgress } from './generation.js';
+import { ProviderError, transitionJob, type GenerationProgress, type MediaArtifactStore } from './generation.js';
 import type { GenerationRunner } from './runtime.js';
 import { generationInputFingerprint } from './generation-fingerprint.js';
-import { FileArtifactStore } from './storage.js';
+import { TemporaryMediaExports } from './media-export.js';
 import type { VoiceService } from './voices.js';
 import type { VoiceCloneInput, VoiceCloneResult, VoiceQuery, VoicePage } from './voice-contracts.js';
 import { readWorkbenchProjectFile, validateWorkbenchProjectFile, workbenchOutboxSchema, type WorkbenchOutboxEntry as OutboxEntry, type WorkbenchProjectFile as WorkbenchFile } from './project-files.js';
@@ -58,13 +58,13 @@ export class FileWorkbenchRepository implements ProjectRepository {
   private constructor(private readonly path: string, private state: WorkbenchFile) {}
   get projectId(): string { return this.state.snapshot.document.id; }
 
-  static async open(directory: string, initial: ProjectSnapshot): Promise<FileWorkbenchRepository> {
+  static async open(directory: string, initial: ProjectSnapshot, mediaStore?: MediaArtifactStore): Promise<FileWorkbenchRepository> {
     const root = resolve(directory);
     await mkdir(root, { recursive: true });
     const path = join(root, 'project.json');
     let state: WorkbenchFile;
     try {
-      state = await readWorkbenchProjectFile(root);
+      state = await readWorkbenchProjectFile(root, mediaStore ? { mediaStore } : {});
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         if (error instanceof DomainError) throw error;
@@ -74,7 +74,7 @@ export class FileWorkbenchRepository implements ProjectRepository {
       try { await atomicFile(path, state, true); }
       catch (writeError) {
         if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') throw writeError;
-        state = await readWorkbenchProjectFile(root);
+        state = await readWorkbenchProjectFile(root, mediaStore ? { mediaStore } : {});
       }
     }
     return new FileWorkbenchRepository(path, state);
@@ -124,8 +124,9 @@ export class FileWorkbenchRepository implements ProjectRepository {
       const mutation = mutate(draft);
       assertProjectInvariants(draft);
       if (draft.id !== envelope.projectId || !z.json().safeParse(mutation.outcome).success) throw new DomainError('INVALID_INPUT', '动作结果无效');
-      const command = mutation.outcome.generationCommand;
-      if (command !== undefined) {
+      const commands = mutation.outcome.generationCommands;
+      if (commands !== undefined && !Array.isArray(commands)) throw new DomainError('INVALID_INPUT', '生成任务批次无效');
+      for (const command of [...(mutation.outcome.generationCommand === undefined ? [] : [mutation.outcome.generationCommand]), ...(Array.isArray(commands) ? commands : [])]) {
         const entry = workbenchOutboxSchema.parse(command) as OutboxEntry;
         if (entry.request && entry.request.projectId !== draft.id) throw new DomainError('INVALID_INPUT', '生成记录不属于当前项目');
         if (entry.operation === 'start' && next.outbox.some(current => !current.done && current.operation === 'start' && current.itemId === entry.itemId)) {
@@ -138,6 +139,7 @@ export class FileWorkbenchRepository implements ProjectRepository {
       if (!Number.isSafeInteger(revision)) throw new DomainError('INTERNAL', '项目版本超出范围');
       const outcome = structuredClone(mutation.outcome);
       delete outcome.generationCommand;
+      delete outcome.generationCommands;
       const receipt: ActionReceipt = { ok: true, requestId: envelope.requestId, projectId: envelope.projectId, revision, undoable: mutation.undoable, outcome };
       next.snapshot = { revision, document: structuredClone(draft) };
       if (mutation.undoable) next.history.push({ requestId: envelope.requestId, before: structuredClone(before), after: structuredClone(draft) });
@@ -259,11 +261,13 @@ export interface WorkbenchOptions {
   providers?: { elevenlabs: boolean; openrouter: boolean };
   initial?: ProjectSnapshot;
   voices?: VoiceService;
+  artifacts?: MediaArtifactStore;
 }
 
 export class Workbench {
   readonly projectId: string;
-  readonly artifacts: FileArtifactStore;
+  readonly artifacts: MediaArtifactStore;
+  readonly mediaExports: TemporaryMediaExports;
   readonly registry = new ActionRegistry();
   readonly executor: ActionExecutor;
   readonly providers: { elevenlabs: boolean; openrouter: boolean };
@@ -283,12 +287,15 @@ export class Workbench {
   private voiceClosing: Promise<void> | undefined;
   private readonly voiceExecutions = new Set<Promise<VoiceCloneResult>>();
 
-  constructor(readonly repository: FileWorkbenchRepository, readonly runner: GenerationRunner | undefined, directory: string, providers: { elevenlabs: boolean; openrouter: boolean }, readonly voices?: VoiceService) {
+  constructor(readonly repository: FileWorkbenchRepository, readonly runner: GenerationRunner | undefined, directory: string, providers: { elevenlabs: boolean; openrouter: boolean }, readonly voices?: VoiceService, artifacts?: MediaArtifactStore) {
     this.projectId = repository.projectId;
     this.caller = { actorId: 'local-gui', source: 'gui', projectIds: new Set([this.projectId]), permissions: new Set(['project.edit', 'generation.submit']) };
     this.internal = { actorId: 'generation-host', source: 'internal', projectIds: new Set([this.projectId]), permissions: new Set(['generation.apply']) };
     this.providers = providers;
-    this.artifacts = runner?.artifacts ?? new FileArtifactStore(join(directory, 'artifacts'));
+    const mediaStore = artifacts ?? runner?.artifacts;
+    if (!mediaStore) throw new DomainError('INVALID_INPUT', '工作台需要显式注入共享资源存储');
+    this.artifacts = mediaStore;
+    this.mediaExports = new TemporaryMediaExports(this.artifacts);
     this.executor = new ActionExecutor(repository, this.registry, event => this.publish(event));
     this.registerHandlers();
   }
@@ -327,6 +334,7 @@ export class Workbench {
     this.close();
     await Promise.allSettled([...this.drains, ...this.executions, ...this.imports.values(), ...this.voiceExecutions, ...(this.voiceClosing ? [this.voiceClosing] : [])]);
     await this.repository.read(this.projectId);
+    await this.mediaExports.close();
   }
   timelineTypes(input: unknown = {}) {
     const parsed = timelineTypeQuerySchema.safeParse(input);
@@ -560,6 +568,27 @@ export class Workbench {
       document.assets[asset.id] = asset;
       return { ...addReference(document, { itemId, assetId: asset.id }), importFingerprint: asset.metadata.importFingerprint ?? null };
     });
+    add('media.outputExternal', z.strictObject({ itemId: idSchema, provenance: z.enum(['manual', 'external']), asset: assetSchema, cancelJobIds: z.array(z.uuid()).max(1000) }), (document, { itemId, provenance, asset, cancelJobIds }, caller) => {
+      if (caller.source !== 'internal') throw new DomainError('FORBIDDEN', '人工输出必须先由宿主验证');
+      const item = itemOf(document, itemId);
+      const timeline = timelineAction(document, item.timelineId, 'media.outputExternal');
+      const declaration = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
+      if (declaration.mode !== 'generated' || !declaration.capabilities.generation || !declaration.capabilities.manualOutput || declaration.outputKind !== 'video') throw new DomainError('NOT_APPLICABLE', '此时间线不支持上传视频生成结果');
+      const durationMs = asset.metadata.durationMs;
+      if (asset.kind !== 'video' || asset.metadata.mimeType !== 'video/mp4' || !Number.isSafeInteger(durationMs) || (durationMs as number) <= 0 || asset.metadata.outputProvenance !== provenance) throw new DomainError('INVALID_INPUT', '人工结果必须是已验证的 MP4 视频');
+      const sourceTicks = Math.max(1, Math.round((durationMs as number) * timeline.ticksPerSecond / 1000));
+      if (!Number.isSafeInteger(sourceTicks)) throw new DomainError('INVALID_INPUT', '视频时长超出支持范围');
+      // Preserve the edited interval and neighboring Items. A shorter source
+      // reduces the interval; a longer source remains available for explicit resize.
+      item.durationTicks = Math.min(item.durationTicks, sourceTicks);
+      item.sourceOffsetTicks = 0;
+      item.generationToken = randomUUID();
+      item.outputAssetId = asset.id;
+      item.outputOrigin = 'manual';
+      document.assets[asset.id] = asset;
+      const commands: OutboxEntry[] = [...new Set(cancelJobIds)].map(jobId => ({ id: randomUUID(), operation: 'cancel', jobId, itemId, done: false }));
+      return { itemId, assetId: asset.id, provenance, durationTicks: item.durationTicks, importFingerprint: asset.metadata.importFingerprint ?? null, generationCommands: commands as unknown as JsonObject[] };
+    });
     add('item.reference.remove', z.strictObject({ itemId: idSchema, assetId: idSchema }), (document, { itemId, assetId }) => {
       const item = itemOf(document, itemId);
       timelineAction(document, item.timelineId, 'item.reference.remove');
@@ -637,7 +666,10 @@ export class Workbench {
   importReferenceMedia(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number; itemId: string }): Promise<ActionResult> {
     return this.verifiedMediaTransaction(input, 'media.referenceExternal', { itemId: input.itemId });
   }
-  private async verifiedMediaTransaction(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number }, actionType: 'asset.import' | 'media.placeExternal' | 'media.referenceExternal', destination: JsonObject): Promise<ActionResult> {
+  importOutputMedia(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number; itemId: string; provenance: 'manual' | 'external' }): Promise<ActionResult> {
+    return this.verifiedMediaTransaction(input, 'media.outputExternal', { itemId: input.itemId, provenance: input.provenance });
+  }
+  private async verifiedMediaTransaction(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number }, actionType: 'asset.import' | 'media.placeExternal' | 'media.referenceExternal' | 'media.outputExternal', destination: JsonObject): Promise<ActionResult> {
     if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
     const fingerprint = createHash('sha256').update(canonical({ mimeType: input.mimeType, name: input.name, expectedRevision: input.expectedRevision, ...(actionType === 'asset.import' ? {} : { actionType, destination }) })).update(input.bytes).digest('hex');
     const previous = this.imports.get(input.requestId);
@@ -649,6 +681,13 @@ export class Workbench {
       if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
       if (snapshot.revision !== input.expectedRevision) return { ok: false, requestId: input.requestId, error: { code: 'REVISION_CONFLICT', message: '项目已更新，请重新读取后重试' } };
       const kind = detectMedia(input.bytes, input.mimeType);
+      if (actionType === 'media.outputExternal') {
+        const item = itemOf(snapshot.document, String(destination.itemId));
+        const timeline = timelineAction(snapshot.document, item.timelineId, actionType);
+        const declaration = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
+        if (declaration.mode !== 'generated' || !declaration.capabilities.generation || !declaration.capabilities.manualOutput || declaration.outputKind !== 'video') throw new DomainError('NOT_APPLICABLE', '此时间线不支持上传视频生成结果');
+        if (kind !== 'video' || input.mimeType !== 'video/mp4' || !z.enum(['manual', 'external']).safeParse(destination.provenance).success) throw new DomainError('INVALID_INPUT', '请选择 MP4 视频，并声明人工上传或外部网页生成来源');
+      }
       if (actionType === 'media.referenceExternal') {
         const item = itemOf(snapshot.document, String(destination.itemId));
         const timeline = timelineAction(snapshot.document, item.timelineId, 'item.reference.add');
@@ -658,22 +697,35 @@ export class Workbench {
         if (item.referenceAssetIds.length >= referenceLimit(declaration, item.params)) throw new DomainError('NOT_APPLICABLE', '参考文件数量已达上限');
       }
       let durationMs: number | undefined;
+      let artifact: GenerationArtifact;
       // 库导入与直接放置共享同一个可信探测入口，后续 item.create 不猜测源媒体时长。
-      if (kind !== 'image') {
-        const controller = new AbortController(); this.mediaReads.add(controller);
-        try { durationMs = await probeMediaDuration(input.bytes, kind, input.mimeType, controller.signal); }
-        finally { this.mediaReads.delete(controller); }
+      const controller = new AbortController(); this.mediaReads.add(controller);
+      try {
+        if (kind !== 'image') durationMs = await probeMediaDuration(input.bytes, kind, input.mimeType, controller.signal);
+        controller.signal.throwIfAborted();
+        artifact = await this.artifacts.write({ signal: controller.signal, attemptToken: { jobId: `import_${randomUUID()}`, attempt: 1 }, bytes: input.bytes, kind, metadata: { mimeType: input.mimeType, name: input.name.slice(0, 200), imported: true, librarySaved: true, importFingerprint: fingerprint, ...(durationMs === undefined ? {} : { durationMs }), ...(actionType === 'media.outputExternal' ? { outputProvenance: destination.provenance! } : {}) } });
+      } finally { this.mediaReads.delete(controller); }
+      if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
+      const cancelJobIds = new Set<string>();
+      if (actionType === 'media.outputExternal') {
+        // The same expected revision protects this read and the eventual commit:
+        // a competing generation submission changes revision and cannot be missed.
+        await this.jobs();
+        for (const job of this.jobsCache.values()) if (job.request.targetItemId === destination.itemId && ['queued', 'running', 'cancelRequested', 'interrupted'].includes(job.state)) cancelJobIds.add(job.id);
+        for (const entry of await this.repository.outbox()) if (entry.itemId === destination.itemId && entry.operation !== 'cancel') cancelJobIds.add(entry.jobId);
       }
-      const artifact = await this.artifacts.write({ attemptToken: { jobId: `import_${randomUUID()}`, attempt: 1 }, bytes: input.bytes, kind, metadata: { mimeType: input.mimeType, name: input.name.slice(0, 200), imported: true, librarySaved: true, importFingerprint: fingerprint, ...(durationMs === undefined ? {} : { durationMs }) } });
       if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
       const caller: CallerContext = { actorId: this.caller.actorId, source: 'internal', projectIds: this.caller.projectIds, permissions: new Set(['project.edit']) };
-      return this.executor.execute({ requestId: input.requestId, expectedRevision: input.expectedRevision, projectId: this.projectId, type: actionType, payload: { asset: artifact.asset, ...destination } }, caller);
+      const result = await this.executor.execute({ requestId: input.requestId, expectedRevision: input.expectedRevision, projectId: this.projectId, type: actionType, payload: { asset: artifact.asset, ...destination, ...(actionType === 'media.outputExternal' ? { cancelJobIds: [...cancelJobIds] } : {}) } }, caller);
+      if (result.ok) this.scheduleDrain();
+      return result;
     })();
     this.imports.set(input.requestId, operation);
     try { return await operation; }
     finally { if (this.imports.get(input.requestId) === operation) this.imports.delete(input.requestId); }
   }
   async mediaAsset(id: string): Promise<AssetData> { return assetOf((await this.snapshot()).document, id); }
+  async prepareMediaExport(assetId: string): Promise<string> { return this.mediaExports.prepare(await this.mediaAsset(assetId)); }
 
   private async applyJob(job: GenerationJob): Promise<void> {
     if (job.state !== 'succeeded' || !job.artifactIds[0] || !this.runner) return;
@@ -696,18 +748,31 @@ export class Workbench {
       this.consuming.add(entry.id);
       if (entry.operation === 'cancel') {
         try {
-          this.active.get(entry.jobId)?.abort();
-          const job = await this.runner.jobs.get(entry.jobId);
-          if (job && !this.active.has(entry.jobId) && !['succeeded', 'failed', 'canceled'].includes(job.state)) {
-            const canceled = await this.runner.jobs.update({ attemptToken: { jobId: job.id, attempt: job.attempt }, states: [job.state] }, current => transitionJob(current.state === 'cancelRequested' ? current : transitionJob(current, 'cancelRequested', new Date().toISOString()), 'canceled', new Date().toISOString()));
-            if (canceled) { this.jobsCache.set(canceled.id, canceled); this.publish({ type: 'generation.changed', job: canceled }); }
-          }
+          await this.cancelStoredJob(entry.jobId);
           await this.repository.completeOutbox(entry.id);
         } finally { this.consuming.delete(entry.id); }
       } else {
         const execution = this.consumeGeneration(entry).catch(() => {}).finally(() => { this.consuming.delete(entry.id); this.executions.delete(execution); });
         this.executions.add(execution);
       }
+    }
+  }
+  private async cancelStoredJob(jobId: string): Promise<void> {
+    const runner = this.runner!;
+    this.active.get(jobId)?.abort();
+    for (let retry = 0; retry < 3; retry++) {
+      const job = await runner.jobs.get(jobId);
+      this.active.get(jobId)?.abort();
+      if (!job || ['succeeded', 'failed', 'canceled'].includes(job.state) || this.active.has(jobId)) return;
+      // Persist both legal transitions separately. The ledger guard deliberately
+      // rejects a direct queued/interrupted -> canceled shortcut.
+      if (job.state !== 'cancelRequested') {
+        const requested = await runner.jobs.update({ attemptToken: { jobId, attempt: job.attempt }, states: [job.state] }, current => transitionJob(current, 'cancelRequested', new Date().toISOString()));
+        if (!requested) continue;
+      }
+      const canceled = await runner.jobs.update({ attemptToken: { jobId, attempt: job.attempt }, states: ['cancelRequested'] }, current => transitionJob(current, 'canceled', new Date().toISOString()));
+      if (canceled) { this.jobsCache.set(canceled.id, canceled); this.publish({ type: 'generation.changed', job: canceled }); }
+      return;
     }
   }
   private async consumeGeneration(entry: OutboxEntry): Promise<void> {
@@ -719,6 +784,14 @@ export class Workbench {
     }
     this.jobsCache.set(job.id, job);
     this.publish({ type: 'generation.changed', job });
+    const target = (await this.snapshot()).document.items[entry.itemId];
+    if (!target || target.generationToken !== job.request.generationToken) {
+      // A queued start can race an accepted manual output before an AbortController
+      // exists. Check the committed intent before making any provider request.
+      await this.cancelStoredJob(job.id);
+      await this.repository.completeOutbox(entry.id);
+      return;
+    }
     if (job.state === 'cancelRequested' && !this.active.has(job.id)) {
       job = (await runner.jobs.update({ attemptToken: { jobId: job.id, attempt: job.attempt }, states: ['cancelRequested'] }, current => transitionJob(current, 'canceled', new Date().toISOString()))) ?? job;
       this.jobsCache.set(job.id, job); this.publish({ type: 'generation.changed', job });
@@ -777,8 +850,10 @@ export function detectMedia(bytes: Uint8Array, mimeType: string): AssetData['kin
 
 export async function createWorkbench(options: WorkbenchOptions = {}): Promise<Workbench> {
   const directory = resolve(options.directory ?? '.pixel');
-  const repository = await FileWorkbenchRepository.open(directory, options.initial ?? createInitialWorkbenchProject());
-  const workbench = new Workbench(repository, options.runner, directory, options.providers ?? { elevenlabs: Boolean(options.runner), openrouter: Boolean(options.runner) }, options.voices);
+  const artifacts = options.artifacts ?? options.runner?.artifacts;
+  if (!artifacts) throw new DomainError('INVALID_INPUT', '工作台需要显式注入共享资源存储');
+  const repository = await FileWorkbenchRepository.open(directory, options.initial ?? createInitialWorkbenchProject(), artifacts);
+  const workbench = new Workbench(repository, options.runner, directory, options.providers ?? { elevenlabs: Boolean(options.runner), openrouter: Boolean(options.runner) }, options.voices, artifacts);
   await workbench.initialize();
   return workbench;
 }

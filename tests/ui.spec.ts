@@ -1,6 +1,30 @@
 import { expect, test, type Page } from '@playwright/test';
-import { resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import type { ActionEnvelope, ActionResult, JsonObject, ProjectSnapshot } from '../src/contracts.js';
+
+let videoFixture:Promise<Buffer>|undefined;
+function manualVideo():Promise<Buffer> {
+  videoFixture??=(async()=>{
+    const root=await mkdtemp(join(tmpdir(),'pixel-manual-video-ui-'));
+    try {
+      const ffmpeg=createRequire(import.meta.url)('ffmpeg-static') as string|null;if(!ffmpeg)throw new Error('Bundled media runtime unavailable');
+      const file=join(root,'manual-result.mp4');
+      const generated=spawnSync(ffmpeg,['-hide_banner','-loglevel','error','-y','-f','lavfi','-i','color=c=blue:s=64x64:r=30:d=2','-c:v','libx264','-pix_fmt','yuv420p','-movflags','+faststart',file],{windowsHide:true});
+      if(generated.status!==0)throw new Error('Unable to generate browser media fixture');
+      return await readFile(file);
+    }finally {const absolute=resolve(root);expect(dirname(absolute)).toBe(resolve(tmpdir()));expect(basename(absolute).startsWith('pixel-manual-video-ui-')).toBe(true);await rm(absolute,{recursive:true,force:true});}
+  })();
+  return videoFixture;
+}
+
+async function fixtureAction(page:Page,type:string,payload:JsonObject):Promise<Extract<ActionResult,{ok:true}>> {
+  const state=await snapshot(page);const response=await page.request.post('/api/actions',{data:{type,payload,projectId:state.document.id,requestId:crypto.randomUUID(),expectedRevision:state.revision}});
+  const result=await response.json() as ActionResult;expect(result.ok,JSON.stringify(result)).toBe(true);if(!result.ok)throw new Error(result.error.message);return result;
+}
 
 /** 声音目录与克隆全部使用测试响应，不读取或修改真实供应商账户。 */
 test.beforeEach(async ({ page }) => {
@@ -836,6 +860,81 @@ test('外部图片直接拖入时间线原子创建普通媒体轨，模型轨�
   expect(imports).toBe(0);expect(placements).toBe(2);
   expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
   await data.dispose();
+});
+
+test('时间线满屏时左侧、轨道与片段右键仍使用同一个新建时间线菜单',async({page})=>{
+  await openWorkbench(page);const original=await snapshot(page);const created:string[]=[];
+  try {
+    for(let index=0;index<7;index++)created.push(String((await fixtureAction(page,'timeline.create',{typeId:'pixel.text'})).outcome.timelineId));
+    const before=await snapshot(page);
+    expect(await page.getByTestId('timeline-workspace').evaluate(element=>element.scrollHeight>element.clientHeight)).toBe(true);
+    const last=page.locator(`[data-timeline-id="${created.at(-1)}"]`);
+    await last.getByTestId('timeline-label').scrollIntoViewIfNeeded();await last.getByTestId('timeline-label').click({button:'right'});
+    await page.getByRole('menuitem',{name:'新建时间线',exact:true}).click();await page.getByRole('menuitem',{name:'普通视频',exact:true}).click();
+    await expect.poll(async()=>Object.keys((await snapshot(page)).document.timelines).length).toBe(Object.keys(before.document.timelines).length+1);
+    const first=await snapshot(page);created.push(Object.keys(first.document.timelines).find(id=>!before.document.timelines[id])!);
+    expect(first.document.items).toEqual(before.document.items);
+    const existingItem=page.getByTestId('timeline-item').first();await existingItem.scrollIntoViewIfNeeded();await existingItem.click({button:'right'});
+    await page.getByRole('menuitem',{name:'新建时间线',exact:true}).click();await page.getByRole('menuitem',{name:'纯文本时间轴',exact:true}).click();
+    await expect.poll(async()=>Object.keys((await snapshot(page)).document.timelines).length).toBe(Object.keys(first.document.timelines).length+1);
+    const second=await snapshot(page);created.push(Object.keys(second.document.timelines).find(id=>!first.document.timelines[id])!);
+    const track=page.locator(`[data-timeline-id="${created.at(-1)}"]`).getByTestId('timeline-track');await track.scrollIntoViewIfNeeded();await track.click({button:'right',position:{x:320,y:18}});
+    await expect(page.getByRole('menuitem',{name:'新建时间线',exact:true})).toBeVisible();await page.keyboard.press('Escape');
+    expect(second.revision).toBe(before.revision+2);expect(second.document.items).toEqual(original.document.items);
+  }finally {for(const id of created)if((await snapshot(page)).document.timelines[id])await fixtureAction(page,'timeline.delete',{timelineId:id});}
+});
+
+test('普通媒体右键上传在点击时间添加对应真实视频音频图片，并与拖入共用接口',async({page})=>{
+  await openWorkbench(page);const ids:string[]=[];const assets:string[]=[];let placements=0;let imports=0;
+  await page.route('**/api/media-place',async route=>{placements++;await route.continue();});await page.route('**/api/import',async route=>{imports++;await route.continue();});
+  const dataSize=8000;const wav=Buffer.alloc(44+dataSize);wav.write('RIFF');wav.writeUInt32LE(36+dataSize,4);wav.write('WAVE',8);wav.write('fmt ',12);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(8000,24);wav.writeUInt32LE(16000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(dataSize,40);
+  const files=[{kind:'video',title:'视频',name:'picked.mp4',mimeType:'video/mp4',buffer:await manualVideo()},{kind:'audio',title:'音频',name:'picked.wav',mimeType:'audio/wav',buffer:wav},{kind:'image',title:'图片',name:'picked.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==','base64')}];
+  try {
+    for(const file of files){
+      const id=String((await fixtureAction(page,'timeline.create',{typeId:`pixel.${file.kind}.local`})).outcome.timelineId);ids.push(id);
+      const row=page.locator(`[data-timeline-id="${id}"]`);const track=row.getByTestId('timeline-track');await track.scrollIntoViewIfNeeded();
+      await track.click({button:'right',position:{x:320,y:18}});
+      const command=page.getByRole('menuitem',{name:`上传并添加${file.title}`,exact:true});await expect(command).toContainText('00:10');
+      await expect(page.getByRole('menuitem',{name:'新建生成草稿',exact:true})).toHaveCount(0);
+      const picking=page.waitForEvent('filechooser');await command.click();const picker=await picking;
+      await expect(page.getByLabel('时间线媒体文件',{exact:true})).toHaveAttribute('accept',new RegExp(file.mimeType));
+      await picker.setFiles({name:file.name,mimeType:file.mimeType,buffer:file.buffer});
+      await expect.poll(async()=>(await snapshot(page)).document.timelines[id]?.itemIds.length).toBe(1);
+      const state=await snapshot(page);const item=state.document.items[state.document.timelines[id]!.itemIds[0]!]!;assets.push(item.outputAssetId!);
+      expect(item.startTick).toBe(10000);expect(state.document.assets[item.outputAssetId!]?.kind).toBe(file.kind);
+      await row.getByTestId('timeline-label').click({button:'right'});await expect(page.getByRole('menuitem',{name:`上传并添加${file.title}`,exact:true})).toBeVisible();await page.keyboard.press('Escape');
+    }
+    expect(placements).toBe(3);expect(imports).toBe(0);expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
+  }finally {for(const id of ids)if((await snapshot(page)).document.timelines[id])await fixtureAction(page,'timeline.delete',{timelineId:id});for(const assetId of assets)await fixtureAction(page,'asset.remove',{assetId});}
+});
+
+test('生成视频详情明确接收人工及外部网页结果，绑定原片段且不调用生成或参考接口',async({page})=>{
+  await openWorkbench(page);const timelineId=String((await fixtureAction(page,'timeline.create',{typeId:'alibaba/wan-3.0'})).outcome.timelineId);let outputId:string|undefined;
+  let uploads=0;let referenceUploads=0;let generationCalls=0;let uploadHeaders:Record<string,string>={};
+  await page.route('**/api/media-output',async route=>{uploads++;uploadHeaders=route.request().headers();await route.continue();});
+  await page.route('**/api/media-reference',async route=>{referenceUploads++;await route.abort();});
+  page.on('request',request=>{if(request.url().endsWith('/api/actions')&&['generation.submit','generation.resume'].includes((request.postDataJSON() as ActionEnvelope).type))generationCalls++;});
+  try {
+    const itemId=String((await fixtureAction(page,'item.createDraft',{timelineId,startTick:1500})).outcome.itemId);
+    const row=page.locator(`[data-item-id="${itemId}"]`);await row.scrollIntoViewIfNeeded();await row.dblclick();
+    const upload=page.getByTestId('media-output-upload');await expect(upload).toBeVisible();await expect(upload).toContainText('MP4');await expect(upload).toContainText('256 MiB');
+    const prompt=page.getByRole('textbox',{name:'画面与风格描述',exact:true});await prompt.fill('用于人工成片的分镜提示词');await prompt.press('Control+Enter');
+    await expect.poll(async()=>(await snapshot(page)).document.items[itemId]?.params.prompt).toBe('用于人工成片的分镜提示词');
+    const before=await snapshot(page);await page.getByRole('combobox',{name:'生成结果来源',exact:true}).selectOption('external');await expect(upload).toContainText('在你使用的模型网页完成生成');
+    const picking=page.waitForEvent('filechooser');await upload.getByRole('button',{name:'选择并上传生成结果',exact:true}).click();const picker=await picking;
+    await picker.setFiles({name:'from-model-web.mp4',mimeType:'video/mp4',buffer:await manualVideo()});
+    await expect.poll(async()=>(await snapshot(page)).document.items[itemId]?.outputOrigin).toBe('manual');
+    const state=await snapshot(page);const item=state.document.items[itemId]!;outputId=item.outputAssetId!;
+    expect(item.params).toEqual(before.document.items[itemId]!.params);expect(item.startTick).toBe(1500);expect(item.referenceAssetIds).toEqual(before.document.items[itemId]!.referenceAssetIds);
+    expect(state.document.assets[outputId]?.metadata.outputProvenance).toBe('external');expect(item.generationToken).not.toBe(before.document.items[itemId]!.generationToken);
+    await expect(page.getByTestId('modal-host').locator('.detail-link')).toContainText('外部网页生成结果');
+    expect(uploadHeaders['x-pixel-item-id']).toBe(itemId);expect(uploadHeaders['x-pixel-output-provenance']).toBe('external');expect(uploadHeaders['x-pixel-project-id']).toBe(state.document.id);
+    expect(uploads).toBe(1);expect(referenceUploads).toBe(0);expect(generationCalls).toBe(0);
+    await prompt.fill('人工成片保留时重新整理提示词');await prompt.press('Control+Enter');
+    await expect.poll(async()=>(await snapshot(page)).document.items[itemId]?.params.prompt).toBe('人工成片保留时重新整理提示词');expect((await snapshot(page)).document.items[itemId]?.outputAssetId).toBe(outputId);
+    await page.keyboard.press('Escape');await expect(page.getByTestId('modal-host')).toHaveCount(0);await page.getByTestId('timeline-ruler').click({position:{x:64,y:8}});await expect(page.getByTestId('viewer').locator(`video[src^="/api/media/${outputId}"]`)).toBeVisible();
+    expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
+  }finally {await page.keyboard.press('Escape');if((await snapshot(page)).document.timelines[timelineId])await fixtureAction(page,'timeline.delete',{timelineId});if(outputId)await fixtureAction(page,'asset.remove',{assetId:outputId});}
 });
 
 test('纯文本参考经时间线基类创建编辑移动缩放复制删除，选中不会遮蔽媒体预览', async ({page})=>{

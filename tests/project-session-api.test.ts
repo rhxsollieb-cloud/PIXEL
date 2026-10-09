@@ -5,7 +5,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createApiServer } from '../src/server.js';
-import { createInitialWorkbenchProject, createWorkbench, WORKBENCH_PROJECT_ID } from '../src/workbench.js';
+import { createInitialWorkbenchProject, createWorkbench, WORKBENCH_PROJECT_ID } from './local-workbench.js';
 import type { ActionResult } from '../src/contracts.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhUYAAAAASUVORK5CYII=', 'base64');

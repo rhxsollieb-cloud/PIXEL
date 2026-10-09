@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { createWorkbench, type Workbench } from '../src/workbench.js';
+import { createWorkbench, type Workbench } from './local-workbench.js';
 import type { ActionResult, JsonObject, ProjectSnapshot } from '../src/contracts.js';
 import { referenceLimit, referenceMinimum, timelineRegistry } from '../src/timeline-catalog.js';
 import { MAX_IMAGE_REFERENCE_BYTES } from '../src/reference-policy.js';

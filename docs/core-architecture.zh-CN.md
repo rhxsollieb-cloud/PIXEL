@@ -8,11 +8,13 @@
 
 1.6 在这一基础上加入素材库自定义分组、持久化轨道顺序、真实媒体多轨叠加预览、声明驱动的声音选择与参考上传，以及按实际高度分栏的上下文菜单。必要的播放、排序、上传和对象编辑控件按用户要求可见，仍受对象、作用域、共享 Action 与统一视觉约束；相关基线修正见设计哲学 1.6，具体实施与许可边界见[声纹、输入、分组与叠加预览](voices-inputs-groups-and-composition.zh-CN.md)。
 
-当前交付包含核心契约、五模型官方 SDK、本地文件工作台、React 界面和可启动的 Electron 桌面宿主。`src/workbench.ts` 已组合项目持久化、生成提交/outbox及内部结果挂载；本文件中标为骨架或目标的示例类仍可独立使用，不代表完整工作台的当前状态。SDK 已用模拟 HTTP 验证，尚未进行付费生成测试。参数、配置及诊断 CLI 见[模型接入与执行边界](model-integrations.zh-CN.md)，运行及独立详情窗口见[本地桌面与像素界面](desktop-ui.zh-CN.md)。当前实际使用 Electron、React、TypeScript、Vite、Zod、dnd-kit 和 Remotion；Radix 与 Zustand 仍是可选方案。
+当前交付包含核心契约、五模型官方 SDK、Seafile 资源与本地项目状态工作台、React 界面和可启动的 Electron 桌面宿主。`src/workbench.ts` 已组合项目持久化、生成提交/outbox及内部结果挂载；本文件中标为骨架或目标的示例类仍可独立使用，不代表完整工作台的当前状态。SDK 已用模拟 HTTP 验证，尚未进行付费生成测试。参数、配置及诊断 CLI 见[模型接入与执行边界](model-integrations.zh-CN.md)，运行及独立详情窗口见[本地桌面与像素界面](desktop-ui.zh-CN.md)。当前实际使用 Electron、React、TypeScript、Vite、Zod、dnd-kit 和 Remotion；Radix 与 Zustand 仍是可选方案。
+
+1.7 补齐满轨创建及普通媒体右键文件选择，增加视频生成 Item 的声明驱动人工输出上传，并将资源权威统一为 Seafile。`MediaArtifactStore` 提供 write/get/listByJob/read/stat/readRange，生产 server、桌面及诊断 CLI 注入同一 Seafile adapter；本地项目、历史及操作账本与媒体存储分离，不存在共享失败后的本地资源回退。默认库和稳定 repo ID 来自可信 `.env`，旧资源迁移保留 UUID、fileRef 和原文件。完整契约、第 10 节评审和验证见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。
 
 ## 1. 先固定产品中的对象与操作
 
-产品采用稳定对象语法：双击进入对象详情，右键发起上下文命令，拖拽表达空间操作或关系；1.4 按用户要求增加限定于 Timeline 左侧的单击默认配置导航例外。1.6 允许相关上下文中的必要可见操作，不通过隐藏按钮牺牲可发现性；同一业务仍只有一个权威处理入口，手势及可见控件不能各写一套规则。默认主工作区仍由 Viewer 与 Timeline 构成，保留当前项目标题、必要窗口控制、播放控件和轨道排序手柄；素材库和模型参数按上下文出现。新项目为空，空 Viewer 不预置示例画面或假波形。具体历史纠偏依据见[哲学对齐记录](philosophy-alignment.zh-CN.md)，当前产品基线以设计哲学 1.6 为准。
+产品采用稳定对象语法：双击进入对象详情，右键发起上下文命令，拖拽表达空间操作或关系；1.4 按用户要求增加限定于 Timeline 左侧的单击默认配置导航例外。1.6 允许相关上下文中的必要可见操作，不通过隐藏按钮牺牲可发现性；同一业务仍只有一个权威处理入口，手势及可见控件不能各写一套规则。默认主工作区仍由 Viewer 与 Timeline 构成，保留当前项目标题、必要窗口控制、播放控件和轨道排序手柄；素材库和模型参数按上下文出现。新项目为空，空 Viewer 不预置示例画面或假波形。具体历史纠偏依据见[哲学对齐记录](philosophy-alignment.zh-CN.md)，当前产品基线以设计哲学 1.7 为准。
 
 | 对象或区域 | 双击 | 右键 | 拖拽 |
 | --- | --- | --- | --- |
@@ -23,7 +25,7 @@
 | Asset | 进入媒体详情 | 素材命令 | 建立 item 的参考素材关系 |
 | Viewer | 进入输出详情 | 素材库：打开当前项目素材上下文，空预览及已有输出均可 | 当前位置只有一个有效媒体层时，拖出已经准备好的真实文件；多层画面不伪装为已导出合成文件 |
 
-模型不是可拖到时间线上的媒体对象。新建操作从 Timeline 工作区空白处的右键菜单进入“新建时间线”，选择类型后执行 `timeline.create`，只创建对应的空 Timeline，不隐式附送 Item 或提示词。生成新内容的标准路径是已有 Timeline 时间位置右键 → 新建生成草稿，提交 `item.createDraft`，只接受 `timelineId` 与 `startTick`，不接受 `assetId`，结果是不带输出的 Item。放置已有素材的标准路径是 Asset → Timeline 时间位置，提交带 `assetId` 的 `item.create`，结果是已关联该素材的 Item。插件为两者提供默认数据及约束；参数编辑随后发生在 Item 详情中。
+模型不是可拖到时间线上的媒体对象。新建操作从主 Timeline 工作区空白、已有轨道或片段上的同一个右键菜单进入“新建时间线”，选择类型后执行 `timeline.create`，只创建对应的空 Timeline，不隐式附送 Item 或提示词。生成新内容的标准路径是已有 Timeline 时间位置右键 → 新建生成草稿，提交 `item.createDraft`，只接受 `timelineId` 与 `startTick`，不接受 `assetId`，结果是不带输出的 Item。放置已有素材的标准路径是 Asset → Timeline 时间位置，提交带 `assetId` 的 `item.create`，结果是已关联该素材的 Item。插件为两者提供默认数据及约束；参数编辑随后发生在 Item 详情中。
 
 两条 GUI 路径具有不同前置对象和业务结果：从模型与时间位置发起生成草稿，从既有素材发起放置。`item.createDraft` 严格拒绝资产参数，`item.create` 要求资产；两者共享创建内核、插件校验、位置不变量和事务规则。纯文本轨复用 `item.createDraft` 创建笔记，正文经 `item.params` 编辑；普通媒体轨没有空草稿，系统文件放置通过受信 `media.placeExternal` 原子登记素材、必要的轨道和片段。已有项目数据及已保存的幂等记录不受影响。正式项目 CLI / Agent 的编辑适配器尚未实现，接线时必须复用这些 Action 与校验；本轮只读文本命令只消费同一快照投影。
 
@@ -80,7 +82,7 @@ ProjectDocument
 | 音频后处理 | `AudioPostProcessor` / `FfmpegAudioPostProcessor` | 按可信发音边界解码、裁尾、淡出与重编码，继承任务取消和超时 | 猜测最后若干字节、项目修改或第二套生成调度 |
 | 任务契约 | `GenerationJob` / `GenerationArtifact` | 可持久化任务、执行状态和输出记录 | 进入项目的 undo 栈 |
 | 任务接口 | `GenerationCoordinator` / `JobRepository` / `ArtifactStore` | 规定调度、原子状态更新和输出存储边界 | 声称完整 coordinator 已实现 |
-| 后端执行 / 文件适配器 | `GenerationRunner` / `FileJobRepository` / `FileArtifactStore` | 执行/恢复捕获请求，单进程任务持久化与真实媒体保存 | 项目/outbox 联合事务、自动调度或多进程数据库锁 |
+| 后端执行 / 资源适配器 | `GenerationRunner` / `FileJobRepository` / `MediaArtifactStore` / `SeafileArtifactStore` | 执行/恢复捕获请求，本地任务账本与共享真实媒体及 artifact 索引分开；FileArtifactStore 仅测试和迁移读取 | 生产本地媒体回退、多人项目编辑或多进程数据库锁 |
 | 生成纯函数 | `transitionJob` / `isJobAttemptCurrent` / `getGenerationResultStaleness` / `isArtifactOwnedByJob` | 校验状态转换、旧 attempt、项目结果有效性及产物归属 | 替代提交时的原子检查 |
 
 上述名称对应代码中的核心模块。`GenerationRunner`、任务 ledger 与产物存储可独立使用；项目持久化、Electron 宿主、生成提交/outbox 与受控结果挂载已由 `src/workbench.ts` 组合实现。基础类表不代表组合层已完成的能力仍待实现，也不代表正式项目 CLI / Agent 已接线。
@@ -278,6 +280,12 @@ sequenceDiagram
 
 项目内存示例便于验证语义；持久化 repository 需要把项目、revision、幂等回执和撤销历史放在同一提交边界中。生成提交还要保证上述 token 与 job/outbox 的原子性。生成完成阶段先持久化 artifact 和成功任务，再通过可重复执行的内部应用动作关联输出，以恢复“输出已生成但尚未挂载”的中断。
 
+### 7.1 人工输出与共享媒体
+
+视频生成声明可提供 `capabilities.manualOutput` 和 `media.outputExternal`；宿主详情通过 `/api/media-output` 调用 `importOutputMedia()`，可信导入流程统一验证真实 MP4、解码时长及 revision，再保存 Seafile artifact 并提交内部 Action。`outputOrigin=manual`、`metadata.outputProvenance=manual|external` 区分人工/网页结果与供应商输出、参考或普通放置。原提示词、模型、位置和引用保留，offset 归零，编辑时长不超过原区间与源长度；挂载、token 旋转与所有旧任务取消 outbox 同事务提交。queued 执行前 token 检查和 running 取消共同防止旧请求覆盖，不隐式调用收费 API。
+
+共享资源索引绑定当前配置库及 UUID 固定路径、对象版本、格式、大小和 SHA256。preview Range 由宿主代理，SDK 参考读取使用同一受控字节端口；签名 URL 和凭证不进入 renderer。项目重开验证当前、历史、outbox 和 job 产物的远端资源，旧本地资源校验迁移但不删除。Windows 原生拖出使用会话临时导出副本，关闭时取消并清理，不将该副本变成 Asset 文件句柄。多人同时编辑项目、共享目录自动登记及整条作品合成导出仍待实现。
+
 ## 8. 插件扩展与版本迁移
 
 `ModelDescriptor` / `ModelDeclaration` / `TimelineDeclaration.referenceMaxBytes` 描述单个参考文件的字节上限。当前 Wan / Grok 共用 `MAX_IMAGE_REFERENCE_BYTES=25 MiB`，GUI、上传与关系 Action、生成输入捕获使用 `referenceExceedsByteLimit()`，SDK 受控读取也按该常量检查真实内容。旧素材没有大小元数据时保持未知，不虚构已通过验证；模型上限不等于通用媒体传输上限。新增支持引用的模型应声明相应大小约束，不能让组件或适配器各写一份数字。
@@ -292,7 +300,7 @@ Timeline 插件只声明语义：支持的 item kind、默认数据、字段 sch
 
 1.4 将 `TimelineData.itemDefaults` 定义为稀疏、显式的 Item 参数默认映射。`ModelDeclaration.defaultFields` / `defaultsJsonSchema` 宣告可默认化的字段，`paramsDefaults` 提供宿主显示用的模型基础值；默认 schema 不自动填入未修改字段。`BaseTimelinePlugin.validateItemDefaults()` 校验稀疏配置，`resolveItemDefaults()` 按插件 manifest.defaultFields 解析有效默认值，供 `createItem()` 与显式刷新共用；创建时再合并显式参数，并捕获 `generationSettings`。正文、prompt、compositionPlan、手动前后文及素材引用不进入默认映射。
 
-`timeline.defaults` 更新默认映射，`timeline.settings` 更新新片段的生成设置；两者保留已有片段配置及输出。旧 Item 缺少 `generationSettings` 时读取旧 Timeline 设置；修改默认设置前，在同一事务为旧 Item 固定原设置。`timeline.refreshDefaults` 明确将当前有效默认配置应用到已有片段：只选 defaultFields 声明的模型基础值，再合并稀疏默认映射及 Timeline 设置，与窗口显示及新片段继承保持一致；保留正文、时间范围和引用，不发起生成。只有实际生成输入改变才换 token 并解除旧生成输出关联；`outputOrigin` 区分 `generated` 与 `placement`，已放置媒体继续保留。旧输出无法确定来源时采取保守保留，不删除媒体文件。具体规则及评审见[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)。
+`timeline.defaults` 更新默认映射，`timeline.settings` 更新新片段的生成设置；两者保留已有片段配置及输出。旧 Item 缺少 `generationSettings` 时读取旧 Timeline 设置；修改默认设置前，在同一事务为旧 Item 固定原设置。`timeline.refreshDefaults` 明确将当前有效默认配置应用到已有片段：只选 defaultFields 声明的模型基础值，再合并稀疏默认映射及 Timeline 设置，与窗口显示及新片段继承保持一致；保留正文、时间范围和引用，不发起生成。只有实际生成输入改变才换 token 并解除旧生成输出关联；`outputOrigin` 区分 `generated`、`placement` 与 `manual`，已放置及人工上传的媒体继续保留。旧输出无法确定来源时采取保守保留，不删除媒体文件。具体规则及评审见[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)。
 
 `TimelineData.pluginId` 和 `pluginVersion` 写入项目；`ProjectDocument.schemaVersion` 管理宿主的数据结构。当前 `createItem()` 检查插件 ID、模型和 schema 版本，不匹配版本时拒绝创建，要求显式迁移；`BaseTimelinePlugin` 尚无迁移方法。
 
@@ -354,6 +362,8 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 | 本地文本、视频、音频、图片与统一时间线目录 | 已实现同一插件基类、能力声明、时间壳与 Action；系统媒体原子放置及本地音视频时长探测 |
 | Agent 文本只读投影及 CLI | 已实现 HTTP / 离线共用投影、时间与正文筛选、有界 Unicode 分片和 revision 游标；没有 Agent 编辑适配器 |
 | 模型 provider 执行模板及两官方 SDK 适配器 | 已实现总超时、取消、脱敏错误、产物守卫；模拟 HTTP 验证 |
+| 视频生成 Item 人工输出 | 已实现声明驱动的 MP4 上传、manual/external 来源、真实时长、幂等及挂载/token/取消 outbox 事务；保留输入和历史，不隐式调用 SDK |
+| Seafile 共享资源与迁移 | 已实现 MediaArtifactStore 端口、媒体及索引共享、代理预览和范围读取、受控 SDK 参考读取、保留旧句柄的迁移；生产无本地资源回退；项目状态仍本地，多人编辑待实现 |
 | 时间线默认配置及明确刷新 | 已实现稀疏默认值、Item 生成设置快照与共享 Action；左侧单击配置、右键刷新；旧片段只在显式刷新时更新 |
 | 素材库自定义分组 | 已实现新建、改名、只删分组、单一成员归属及 Asset 删除清理，共用项目 Action、事务与持久化 |
 | 轨道上下顺序 | 已实现 dnd-kit 手势、`timeline.reorder`、共享顺序投影及新建 / 删除 / 外部新轨事务维护；片段时间不变 |
@@ -363,7 +373,7 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 | React Timeline、ModalHost、Viewer | Viewer + Timeline；逐层详情、分栏菜单、字段、移动/边缘拖拽、时间定位、排序与独立库已实现；相关可见操作使用共同宿主；浏览器采用同源 popup，局部详情隔离保持 |
 | 多轨叠加预览及并发播放 | 已实现 Remotion Player 真实图像 / 视频层、上下前景、透明与源偏移、并发音频及双向指针；当前 1280×720 / 60fps；合成文件导出待实现 |
 | Electron 窗口宿主及跨窗口拖拽 | 共同 `DesktopWindowHost`、非模态 workspace/library、窄 preload 与 `ObjectDragBroker` 已实现；真实窗口间放置、引用和复用及局部详情隔离已通过原生验证 |
-| 任务/文件持久化及 Wan 远端任务恢复 | 已实现文件 ledger、产物存储和 runner run/resume；单后端进程 |
+| 任务/资源持久化及 Wan 远端任务恢复 | 已实现本地任务 ledger、Seafile 产物存储和 runner run/resume；单后端进程 |
 | 项目持久化、token 与 job/outbox 联合事务、自动调度 | 单机文件工作台已实现；事务保存 outbox 后消费，含启动恢复及旧结果守卫 |
 | 桌面项目文件 / 目录拖入打开与空目录初始化 | 已实现原位置文件校验、空目录原子创建、动态项目 ID、独立 origin 会话、旧窗口/拖拽/票据清理及最近目录记忆；浏览器开发版仅提示使用桌面版 |
 | 插件 schema 版本迁移器与缺失插件占位 UI | 仅设计 |

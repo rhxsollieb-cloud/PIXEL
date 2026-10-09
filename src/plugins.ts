@@ -25,7 +25,7 @@ export interface TimelinePluginManifest {
   schemaVersion: number;
   modelIds: readonly string[];
   /** 插件声明能力，宿主统一据此路由；本地语义无需提供生成模型。 */
-  capabilities: { generation: boolean; mediaPlacement: boolean; references: boolean };
+  capabilities: { generation: boolean; mediaPlacement: boolean; references: boolean; manualOutput?: boolean };
   /** 供只读 Agent 投影读取的正文参数键，不从模型名称猜测。 */
   referenceTextFields: readonly string[];
   itemKind: string;

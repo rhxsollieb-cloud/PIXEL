@@ -14,7 +14,7 @@ async function fixture(context: TestContext) {
   const assets = new Map<string, AssetData>([['image', { id: 'image', kind: 'image', fileRef: 'pixel-asset:owned', metadata: {} }]]);
   const workbench = {
     mediaAsset: async (id: string) => { const asset = assets.get(id); if (!asset) throw new Error('Unknown asset'); return asset; },
-    artifacts: { resolvePath: async () => path },
+    prepareMediaExport: async () => path,
   };
   const tickets = new ExportTickets(workbench, id => assets.get(id));
   return { assets, path, tickets, workbench };
@@ -58,8 +58,8 @@ test('project session close invalidates current tickets and asynchronous prepara
   const existing = await tickets.prepare('image', 1);
   let continueResolve: (() => void) | undefined;
   const resolved = new Promise<void>(accept => { continueResolve = accept; });
-  const originalResolve = workbench.artifacts.resolvePath;
-  workbench.artifacts.resolvePath = async () => { await resolved; return originalResolve(); };
+  const originalResolve = workbench.prepareMediaExport;
+  workbench.prepareMediaExport = async () => { await resolved; return originalResolve(); };
   const pending = tickets.prepare('image', 1);
   tickets.clear();
   continueResolve!();

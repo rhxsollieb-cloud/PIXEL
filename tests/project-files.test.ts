@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createWorkbench, captureGenerationRequest, type Workbench } from '../src/workbench.js';
+import { createWorkbench, captureGenerationRequest, type Workbench } from './local-workbench.js';
 import { preparePixelProjectLocation, readWorkbenchProjectFile } from '../src/project-files.js';
 import { FileArtifactStore, FileJobRepository } from '../src/storage.js';
 import { createWorkbenchFixture } from './workbench-fixtures.js';
@@ -110,7 +110,7 @@ test('project assets reopen with media and missing files fail before switching',
   assert.equal((await preparePixelProjectLocation(base)).existing, true);
   const reopened = await createWorkbench({ directory: base }); context.after(() => reopened.shutdown());
   assert.deepEqual((await reopened.artifacts.read(asset, new AbortController().signal)).bytes, png);
-  const path = await workbench.artifacts.resolvePath(asset); await rm(path);
+  const path = await workbench.artifacts.resolvePath!(asset); await rm(path);
   await assert.rejects(preparePixelProjectLocation(base), /素材文件缺失/);
   assert.equal((await workbench.snapshot()).document.assets[asset.id]!.id, asset.id);
 });
@@ -149,7 +149,7 @@ test('project and live artifact reads reject directory links outside controlled 
   await writeFile(join(project, 'project.json'), JSON.stringify(file));
   await assert.rejects(preparePixelProjectLocation(project), /超出了项目目录/);
   await assert.rejects(workbench.artifacts.get(artifact.id), /超出了项目存储范围/);
-  await assert.rejects(workbench.artifacts.resolvePath(artifact.asset), /超出了项目存储范围/);
+  await assert.rejects(workbench.artifacts.resolvePath!(artifact.asset), /超出了项目存储范围/);
 });
 
 test('new project publication never overwrites a file created after directory preparation', async context => {

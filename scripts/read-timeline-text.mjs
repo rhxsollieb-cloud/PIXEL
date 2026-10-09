@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util';
 import { resolve, basename, dirname } from 'node:path';
 import { stat } from 'node:fs/promises';
-import { readWorkbenchProjectFile } from '../src/project-files.ts';
+import { readWorkbenchProjectMetadata } from '../src/project-files.ts';
 import { queryTimelineText, formatTimelineText } from '../src/timeline-text.ts';
 
 // Reading a saved snapshot never instantiates Workbench/Runner or loads .env.
@@ -30,7 +30,7 @@ try {
         const value = number(flag); return value === undefined ? [] : [[key,value]];
       })),
     };
-    const file = await readWorkbenchProjectFile(info.isDirectory() ? path : dirname(path));
+    const file = await readWorkbenchProjectMetadata(info.isDirectory() ? path : dirname(path));
     const page = queryTimelineText(file.snapshot, query);
     process.stdout.write(values.format === 'json' ? `${JSON.stringify(page)}\n` : formatTimelineText(page));
   }

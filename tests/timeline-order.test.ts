@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { orderedTimelineIds, type ActionResult, type JsonObject } from '../src/contracts.js';
-import { createWorkbench, type Workbench } from '../src/workbench.js';
+import { createWorkbench, type Workbench } from './local-workbench.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhUYAAAAASUVORK5CYII=', 'base64');
 function success(result: ActionResult) { assert.equal(result.ok, true, JSON.stringify(result)); if (!result.ok) throw new Error('Expected success'); return result; }

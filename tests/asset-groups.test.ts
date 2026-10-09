@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { assertProjectInvariants, MemoryProjectRepository } from '../src/backend.js';
 import { assetGroupTitleSchema, type ActionResult, type CallerContext, type ProjectDocument } from '../src/contracts.js';
 import { validateWorkbenchProjectFile } from '../src/project-files.js';
-import { createWorkbench, type Workbench } from '../src/workbench.js';
+import { createWorkbench, type Workbench } from './local-workbench.js';
 
 function document(): ProjectDocument {
   const ids = [randomUUID(), randomUUID()];

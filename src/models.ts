@@ -487,10 +487,10 @@ export class ModelTimelinePlugin extends BaseTimelinePlugin {
     this.manifest = {
       pluginId: descriptor.pluginId, name: descriptor.title, schemaVersion: 1,
       modelIds: [descriptor.modelId, ...descriptor.aliases], itemKind: descriptor.itemKind,
-      capabilities: { generation: true, mediaPlacement: true, references: descriptor.maxReferences > 0 },
+      capabilities: { generation: true, mediaPlacement: true, references: descriptor.maxReferences > 0, ...(descriptor.outputKind === 'video' ? { manualOutput: true } : {}) },
       referenceTextFields: descriptor.referenceTextFields,
       fields: descriptor.fields, defaultFields: descriptor.defaultFields,
-      supportedActions: [...supportedActions, ...(descriptor.maxReferences > 0 ? ['item.reference.add', 'item.reference.remove'] : [])], overlapPolicy: 'reject',
+      supportedActions: [...supportedActions, ...(descriptor.maxReferences > 0 ? ['item.reference.add', 'item.reference.remove'] : []), ...(descriptor.outputKind === 'video' ? ['media.outputExternal'] : [])], overlapPolicy: 'reject',
     };
     this.settingsSchema = descriptor.settingsSchema;
     this.itemParamsSchema = descriptor.paramsSchema;

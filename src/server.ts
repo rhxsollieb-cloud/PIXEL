@@ -6,12 +6,31 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { DomainError } from './backend.js';
 import { createWorkbench, type Workbench, type WorkbenchOptions } from './workbench.js';
-import { loadBackendConfiguration } from './backend-configuration.js';
+import { loadBackendConfiguration, loadSeafileConfiguration } from './backend-configuration.js';
+import { SeafileArtifactStore } from './seafile-storage.js';
+import { migrateLegacyArtifacts } from './resource-migration.js';
+import { preparePixelProjectLocation as prepareLocalProjectLocation } from './project-files.js';
+import { basename, dirname } from 'node:path';
+import { readWorkbenchProjectFile } from './project-files.js';
 import { queryTimelineText, formatTimelineText } from './timeline-text.js';
 import { timelineRegistry } from './timeline-catalog.js';
 import { VoiceService, VoiceServiceError } from './voices.js';
 import { ElevenLabsVoiceProvider } from './providers/elevenlabs-voices.js';
-export { preparePixelProjectLocation } from './project-files.js';
+import { ProviderError } from './generation.js';
+export { FileArtifactStore } from './storage.js';
+/** Desktop project ingress uses the same remote resource authority as the running workbench. */
+export async function preparePixelProjectLocation(targetPath: string, options: { envPath?: string; artifacts?: import('./generation.js').MediaArtifactStore } = {}) {
+  if (typeof targetPath !== 'string' || !isAbsolute(targetPath) || targetPath.includes('\0')) throw new DomainError('INVALID_INPUT', '项目位置必须是有效的本地绝对路径');
+  const target = await realpath(targetPath);
+  const info = await stat(target);
+  if (!info.isDirectory() && (!info.isFile() || basename(target).toLowerCase() !== 'project.json')) throw new DomainError('INVALID_INPUT', '请拖入 Pixel 项目目录、project.json 或空文件夹');
+  const directory = info.isDirectory() ? target : dirname(target);
+  try { await readWorkbenchProjectFile(directory, { externalOpen: true, validateResources: false }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return prepareLocalProjectLocation(targetPath); throw error; }
+  const artifacts = options.artifacts ?? await SeafileArtifactStore.open(await loadSeafileConfiguration(options));
+  if (artifacts instanceof SeafileArtifactStore) await migrateLegacyArtifacts(directory, artifacts);
+  return prepareLocalProjectLocation(targetPath, { mediaStore: artifacts });
+}
 
 export interface ApiOptions {
   frontendPort?: number;
@@ -219,7 +238,7 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
         json(response, 200, await workbench.placeExternalMedia({ bytes: await bytes(request, 256 * 1024 * 1024), mimeType, name, requestId, expectedRevision, startTick,
           ...(timelineId === undefined ? {} : { timelineId }) })); return;
       }
-      if (request.method === 'POST' && ['/api/media-reference', '/api/voice-clone'].includes(url.pathname)) {
+      if (request.method === 'POST' && ['/api/media-reference', '/api/media-output', '/api/voice-clone'].includes(url.pathname)) {
         if (scalarHeader(request, 'x-pixel-project-id') !== workbench.projectId) throw new DomainError('FORBIDDEN', '上传不属于当前项目');
         const mimeType = scalarHeader(request, 'content-type').split(';')[0]!.trim().toLowerCase();
         const requestId = scalarHeader(request, 'x-pixel-request-id');
@@ -231,6 +250,12 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
           const itemId = scalarHeader(request, 'x-pixel-item-id');
           json(response, 200, await workbench.importReferenceMedia({ bytes: await bytes(request, 256 * 1024 * 1024), mimeType, name, requestId, expectedRevision, itemId })); return;
         }
+        if (url.pathname === '/api/media-output') {
+          const itemId = scalarHeader(request, 'x-pixel-item-id');
+          const provenance = scalarHeader(request, 'x-pixel-output-provenance');
+          if (provenance !== 'manual' && provenance !== 'external') throw new DomainError('INVALID_INPUT', '请选择人工上传或外部网页生成的来源');
+          json(response, 200, await workbench.importOutputMedia({ bytes: await bytes(request, 256 * 1024 * 1024), mimeType, name, requestId, expectedRevision, itemId, provenance })); return;
+        }
         const timelineId = scalarHeader(request, 'x-pixel-timeline-id');
         let voiceName: string;
         try { voiceName = decodeURIComponent(scalarHeader(request, 'x-pixel-voice-name')); }
@@ -241,28 +266,30 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
       if ((request.method === 'GET' || request.method === 'HEAD') && /^\/api\/media\/[^/]+$/.test(url.pathname)) {
         const id = decodeURIComponent(url.pathname.slice('/api/media/'.length));
         const asset = await workbench.mediaAsset(id);
-        const path = await workbench.artifacts.resolvePath(asset);
-        const size = (await stat(path)).size;
+        const controller = new AbortController();
+        response.on('close', () => controller.abort());
+        const info = await workbench.artifacts.stat(asset, controller.signal);
+        const size = info.byteLength;
         const range = request.headers.range ? rangeOf(request.headers.range, size) : undefined;
         if (request.headers.range && !range) { response.writeHead(416, { 'Content-Range': `bytes */${size}` }); response.end(); return; }
+        const media = request.method === 'HEAD' ? undefined : range
+          ? await workbench.artifacts.readRange(asset, range, controller.signal)
+          : await workbench.artifacts.read(asset, controller.signal);
         response.writeHead(range ? 206 : 200, {
-          'Content-Type': String(asset.metadata.mimeType), 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes',
+          'Content-Type': info.mimeType, 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes',
           'Cache-Control': 'private, max-age=3600',
           'Content-Length': range ? range.end - range.start + 1 : size,
           'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(String(asset.metadata.name ?? `${asset.id}.${asset.metadata.extension}`))}`,
           ...(range ? { 'Content-Range': `bytes ${range.start}-${range.end}/${size}` } : {}),
         });
         if (request.method === 'HEAD') { response.end(); return; }
-        const stream = createReadStream(path, range ? { start: range.start, end: range.end } : {});
-        response.on('close', () => stream.destroy());
-        stream.on('error', () => response.destroy());
-        stream.pipe(response); return;
+        response.end(media!.bytes); return;
       }
       json(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: '接口不存在' } });
     })().catch(error => {
       if (response.headersSent) { response.destroy(); return; }
       json(response, error instanceof DomainError && error.code === 'NOT_FOUND' ? 404 : 400, {
-        ok: false, error: error instanceof DomainError || error instanceof VoiceServiceError ? { code: error.code, message: error.message } : { code: 'INTERNAL', message: '本地宿主处理失败' },
+        ok: false, error: error instanceof DomainError || error instanceof VoiceServiceError || error instanceof ProviderError ? { code: error.code, message: error.message } : { code: 'INTERNAL', message: '本地宿主处理失败' },
       });
     });
   });
@@ -280,16 +307,18 @@ export async function startWorkbenchServer(options: WorkbenchOptions & ApiOption
   let runner = options.runner;
   let providers = options.providers;
   let voices = options.voices;
+  const artifacts = options.artifacts ?? runner?.artifacts ?? await SeafileArtifactStore.open(await loadSeafileConfiguration(options));
+  if (artifacts instanceof SeafileArtifactStore) await migrateLegacyArtifacts(directory, artifacts);
   if (!runner && !providers) {
     try {
       const configuration = await loadBackendConfiguration({ storageDirectory: directory, ...(options.envPath ? { envPath: options.envPath } : {}) });
       const { createModelBackend } = await import('./runtime.js');
-      runner = createModelBackend(configuration);
+      runner = createModelBackend(configuration, artifacts);
       providers = { elevenlabs: true, openrouter: true };
       voices ??= new VoiceService(new ElevenLabsVoiceProvider({ apiKey: configuration.elevenlabsApiKey }), resolve(directory, 'voice-operations'));
     } catch { providers = { elevenlabs: false, openrouter: false }; }
   }
-  const workbench = await createWorkbench({ ...options, directory, ...(runner ? { runner } : {}), ...(providers ? { providers } : {}), ...(voices ? { voices } : {}) });
+  const workbench = await createWorkbench({ ...options, directory, artifacts, ...(runner ? { runner } : {}), ...(providers ? { providers } : {}), ...(voices ? { voices } : {}) });
   const apiPort = options.apiPort ?? port(process.env.PIXEL_API_PORT, 4311);
   const frontendPort = options.frontendPort ?? port(process.env.PIXEL_PORT, 4310);
   const server = createApiServer(workbench, { ...options, apiPort, frontendPort });

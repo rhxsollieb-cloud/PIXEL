@@ -29,7 +29,7 @@ export function createInteractionHost(projectId: string, getTypes: () => readonl
     return typeof tick === 'number' && Number.isSafeInteger(tick) && tick >= 0 ? tick : undefined;
   };
   const definitions = [
-    { id: 'timeline.create', title: '新建时间线', kinds: ['project'] as const, payload: () => ({}) },
+    { id: 'timeline.create', title: '新建时间线', kinds: ['project','timeline','item'] as const, payload: () => ({}) },
     { id: 'item.createDraft', title: '新建生成草稿', kinds: ['timeline'] as const, payload: (c: ContextActionContext) => ({ timelineId: 'id' in c.target ? c.target.id : '', startTick: positionTick(c)! }) },
     { id: 'timeline.refreshDefaults', title: '刷新时间轴默认配置', kinds: ['timeline'] as const, payload: (c: ContextActionContext) => ({ timelineId: 'id' in c.target ? c.target.id : '' }) },
     { id: 'timeline.delete', title: '删除时间线', kinds: ['timeline'] as const, payload: (c: ContextActionContext) => ({ timelineId: 'id' in c.target ? c.target.id : '' }) },
@@ -48,6 +48,9 @@ export function createInteractionHost(projectId: string, getTypes: () => readonl
       const declaration = context.target.kind === 'timeline'
         ? declarationForTimeline(getTypes(), context.project.document.timelines[id])
         : context.target.kind === 'item' ? modelFor(context.project, id) : undefined;
+      // Creation is a project command discovered from any root timeline context.
+      // Keep the same definition and submenu when rows fill the workspace.
+      if (definition.id === 'timeline.create') return context.scopeId ? {status:'hidden'} : {status:'available'};
       if (['timeline','item'].includes(context.target.kind) && !declaration?.supportedActions.includes(definition.id)) return { status: 'hidden' };
       if (definition.id === 'item.createDraft') {
         return positionTick(context) !== undefined && declaration?.supportedActions.includes(definition.id) ? { status: 'available' } : { status: 'hidden' };
@@ -116,6 +119,6 @@ export function createInteractionHost(projectId: string, getTypes: () => readonl
   drag.register({sourceRole:'external.media',targetRole:'asset-library',actionType:'asset.import',
     preview:()=>({status:'available'}),buildPayload:()=>({}),
   });
-  for(const [action,path] of [['item.params','field:item'],['timeline.settings','field:timeline'],['timeline.defaults','field:timeline-defaults'],['project.title','field:project'],['project.open','drag:external-project->workspace'],['voice.clone','detail:timeline-voice-clone'],['media.referenceExternal','detail:item-reference-upload'],['timeline.reorder','drag:timeline.sort'],['assetGroup.create','detail:library-group-create'],['assetGroup.rename','detail:library-group-rename'],['assetGroup.remove','detail:library-group-remove'],['assetGroup.moveAsset','field:asset-group']]) paths.claim(action!,path!);
+  for(const [action,path] of [['item.params','field:item'],['timeline.settings','field:timeline'],['timeline.defaults','field:timeline-defaults'],['project.title','field:project'],['project.open','drag:external-project->workspace'],['voice.clone','detail:timeline-voice-clone'],['media.referenceExternal','detail:item-reference-upload'],['media.outputExternal','detail:item-output-upload'],['timeline.reorder','drag:timeline.sort'],['assetGroup.create','detail:library-group-create'],['assetGroup.rename','detail:library-group-rename'],['assetGroup.remove','detail:library-group-remove'],['assetGroup.moveAsset','field:asset-group']]) paths.claim(action!,path!);
   return {navigator,paths,menu,drag};
 }

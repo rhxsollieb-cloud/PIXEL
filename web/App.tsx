@@ -16,6 +16,7 @@ import { atPath, defaultFromSchema, FieldEditor, fieldLabel, schemaAtPath, withP
 import { VoiceCloneForm } from './voice-field.js';
 import { AssetGroups } from './asset-groups.js';
 import { SortableTimelineRow, TimelineSortHost } from './timeline-sortable.js';
+import { MediaOutputUpload, MAX_MEDIA_UPLOAD_BYTES, type ManualOutputProvenance } from './media-output-upload.js';
 import { PixelBadge, PixelContextMenu, PixelEmpty, PixelField, PixelIcon, PixelInput, PixelModalHost, PixelPanel, PixelProgress, PixelWindowHost, type PixelContextMenuItem } from './ui/index.js';
 
 const MIME = 'application/x-pixel-object';
@@ -110,6 +111,9 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   const finishResize=useRef<(()=>void) | undefined>(undefined);
   const live=useRef(true);
   const [menu,setMenu]=useState<{x:number;y:number;items:PixelContextMenuItem[]} | undefined>();
+  const mediaPicker=useRef<HTMLInputElement>(null);
+  const mediaPickerTarget=useRef<DragTarget | undefined>(undefined);
+  const [mediaPickerKind,setMediaPickerKind]=useState<MediaKind>('video');
   const [dragging,setDragging]=useState<DesktopObjectDrag | undefined>();
   const sourceSession=useRef<string | undefined>(undefined);
   const [dropHint,setDropHint]=useState<{id:string;tick:number;valid:boolean} | undefined>();
@@ -140,6 +144,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   useEffect(()=>{if(path.length){finishScrub.current?.();finishResize.current?.();endDrag(true);}},[path.length]);
   useEffect(()=>()=>{live.current=false;finishScrub.current?.();finishResize.current?.();endDrag(true);},[]);
   useEffect(()=>windows.onObjectDrag(value=>{setDragging(value);if(!value)setDropHint(undefined);}),[windows]);
+  useEffect(()=>{const picker=mediaPicker.current;const cancel=()=>{mediaPickerTarget.current=undefined;};picker?.addEventListener('cancel',cancel);return()=>picker?.removeEventListener('cancel',cancel);},[]);
   useEffect(()=>{if(libraryMode&&!current)globalThis.document.querySelector<HTMLElement>('[data-testid="library-window"]')?.focus();},[libraryMode,current]);
 
   useEffect(()=>{
@@ -280,17 +285,31 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
     const project=store.getSnapshot();if(!project||!host.navigator.isInteractive(scopeId))return;
     const context={target,project,...(scopeId?{scopeId}: {}),...(data?{data}:{})};
     const actions=host.menu.list(context);
+    const createTimeline:PixelContextMenuItem={id:'timeline.create',label:'新建时间线',onSelect:()=>{
+      setMenu({x,y,items:timelineTypeMenuItems(x,y,models.slice(0,20),typeCursor,context,scopeId)});
+    }};
     if(createOnly) {
       if(!actions.some(action=>action.id==='timeline.create'))return;
-      setMenu({x,y,items:[{id:'timeline.create',label:'新建时间线',onSelect:()=>{
-        setMenu({x,y,items:timelineTypeMenuItems(x,y,models.slice(0,20),typeCursor,context,scopeId)});
-      }}]});return;
+      setMenu({x,y,items:[createTimeline]});return;
     }
-    const items=actions.filter(action=>action.id!=='timeline.create').map(action=>({
+    const items:PixelContextMenuItem[]=actions.filter(action=>action.id!=='timeline.create').map(action=>({
       id:action.id,label:action.id==='generation.submit'&&document?.items['id' in target?target.id:'']?.outputAssetId?'重新生成':action.id==='item.createDraft'?(declarationForTimeline(models,document?.timelines['id' in target?target.id:''])?.draftTitle ?? action.title):action.title,
       ...(action.availability.status==='disabled'?{description:action.availability.reason,disabled:true}:{}),
       onSelect:()=>{const latest=store.getSnapshot();if(!latest)return;const command=host.menu.commandFor(action.id,{...context,project:latest});if(command)void execute(command.type,command.payload as JsonObject,scopeId);},
     }));
+    const timeline=target.kind==='timeline'?project.document.timelines[target.id]:target.kind==='item'?project.document.timelines[project.document.items[target.id]?.timelineId ?? '']:undefined;
+    const declaration=declarationForTimeline(models,timeline);
+    if(!scopeId&&timeline&&declaration?.mode==='local'&&declaration.capabilities.mediaPlacement&&declaration.outputKind){
+      const tick=typeof data?.startTick==='number'?data.startTick:Math.round(playheadMs/1000*timeline.ticksPerSecond);
+      const uploadTarget:DragTarget={role:'timeline.position',object:{kind:'timeline',projectId,id:timeline.id},data:{startTick:tick}};
+      items.unshift({id:'media.placeExternal.picker',label:`上传并添加${referenceKindTitle(declaration.outputKind)}`,description:`${referenceFormats[declaration.outputKind].label} · 最多 ${MAX_MEDIA_UPLOAD_BYTES/1024/1024} MiB · ${playbackTimeLabel(tick/timeline.ticksPerSecond*1000)}位置`,disabled:pending>0,onSelect:()=>{
+        if(!host.navigator.isInteractive(undefined))return;
+        mediaPickerTarget.current=uploadTarget;setMediaPickerKind(declaration.outputKind!);
+        // React must update accept before opening the system picker.
+        window.requestAnimationFrame(()=>{if(live.current&&host.navigator.isInteractive(undefined))mediaPicker.current?.click();});
+      }});
+    }
+    if(actions.some(action=>action.id==='timeline.create'))items.push(createTimeline);
     if(items.length)setMenu({x,y,items});
   }
   function timelineTypeMenuItems(x:number,y:number,types:readonly TimelineDeclaration[],cursor:string|undefined,context:ContextActionContext,scopeId?:string):PixelContextMenuItem[] {
@@ -393,6 +412,12 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   async function placeMediaFile(event:DragEvent,file:File) {
     const target=externalMediaTarget(event);
     if(!target){setFeedback({text:'请将媒体拖入普通媒体时间线或时间线空白处',error:true});return;}
+    await placeFileAtTarget(file,target);
+  }
+  /** System drop and context-menu picker use one file-to-position adapter. */
+  async function placeFileAtTarget(file:File,target:DragTarget) {
+    if(!live.current||!host.navigator.isInteractive(undefined)||pending>0)return;
+    if(!file.size||file.size>MAX_MEDIA_UPLOAD_BYTES){setFeedback({text:`媒体文件需要有效内容，单文件最多 ${MAX_MEDIA_UPLOAD_BYTES/1024/1024} MiB`,error:true});return;}
     const latest=store.getSnapshot();if(!latest)return;
     const context=dropContext(fileSource(file),target);
     const availability=context?host.drag.hover(context):undefined;
@@ -489,6 +514,20 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
       if(!live.current)return;await store.refresh();if(!live.current)return;
       setFeedback({text:result.ok?`已添加参考 ${file.name}`:result.error.message,error:!result.ok});
     }catch{if(live.current)setFeedback({text:'参考文件上传未完成，请检查格式与本地服务',error:true});}
+    finally{if(live.current)setPending(value=>value-1);}
+  }
+  async function uploadOutput(file:File,provenance:ManualOutputProvenance,itemId:string,scopeId:string) {
+    const latest=store.getSnapshot();if(!latest||!live.current||!host.navigator.isInteractive(scopeId)||pending>0)return;
+    const item=latest.document.items[itemId];
+    const declaration=declarationForTimeline(models,latest.document.timelines[item?.timelineId??'']);
+    if(!item||!declaration?.capabilities.manualOutput){setFeedback({text:'当前片段不支持上传生成结果',error:true});return;}
+    if(mediaMimeType(file)!=='video/mp4'||!file.size||file.size>MAX_MEDIA_UPLOAD_BYTES){setFeedback({text:'生成结果需要有效的 MP4 文件，单文件最多 256 MiB',error:true});return;}
+    setPending(value=>value+1);
+    try{
+      const result=await bridge.importOutputFile(file,latest,crypto.randomUUID(),itemId,provenance);
+      if(!live.current)return;await store.refresh();if(!live.current||!host.navigator.isInteractive(scopeId))return;
+      setFeedback({text:result.ok?`已上传${provenance==='external'?'外部网页生成':'人工'}结果 ${file.name}`:result.error.message,error:!result.ok});
+    }catch{if(live.current&&host.navigator.isInteractive(scopeId))setFeedback({text:'生成结果上传未完成，请检查 MP4 文件与资源服务',error:true});}
     finally{if(live.current)setPending(value=>value-1);}
   }
   async function cloneVoice(file:File,name:string,requestId:string,timelineId:string,scopeId:string):Promise<VoiceSummary> {
@@ -589,13 +628,14 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
           onCommit={value=>commitDefault([field.key],value)} onOpen={()=>open(object as ObjectRef,scope,['itemDefaults',field.key])}/>)}
       </>}
       {item && !nestedPath.length && <>
+        {model.capabilities.manualOutput&&<MediaOutputUpload key={`${scope}:${item.id}:output`} disabled={pending>0} hasOutput={Boolean(item.outputAssetId)} onUpload={(file,provenance)=>uploadOutput(file,provenance,item.id,scope)}/>}
         {model.capabilities.references&&model.maxReferences>0&&<div className={`reference-zone ${canReferenceDrop(item.id,scope)?'reference-zone--active':''}`} data-testid="item-reference"
           onDragOver={event=>dragOver(event,refTarget(item.id),scope)} onDrop={event=>drop(event,refTarget(item.id),scope)}>
           <span className="pixel-title"><PixelIcon name="reference"/> 参考素材</span>
           <ReferenceUpload key={`${scope}:${item.id}`} declaration={model} item={item} disabled={pending>0} onUpload={file=>uploadReference(file,item.id,scope)}/>
           {item.referenceAssetIds.map(id=>{const asset=document.assets[id];return asset?<div key={id} className="reference-card" tabIndex={0} onDoubleClick={()=>open({kind:'asset',projectId:projectId,id},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',projectId:projectId,id},scope)} onContextMenu={event=>context(event,{kind:'asset',projectId:projectId,id},scope)}><MediaPreview asset={asset}/><span>{String(asset.metadata.name ?? '参考图像')}</span></div>:null;})}
         </div>}
-        {item.outputAssetId && <div className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'asset',id:item.outputAssetId!,projectId:projectId},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',id:item.outputAssetId!,projectId:projectId},scope)}><PixelIcon name="image"/>{model.capabilities.generation?'生成输出':'输出媒体'}<span><PixelIcon name="chevron"/></span></div>}
+        {item.outputAssetId && <div className="detail-link" tabIndex={0} onDoubleClick={()=>open({kind:'asset',id:item.outputAssetId!,projectId:projectId},scope)} onKeyDown={event=>objectKeys(event,{kind:'asset',id:item.outputAssetId!,projectId:projectId},scope)}><PixelIcon name="image"/>{document.assets[item.outputAssetId]?.metadata.outputProvenance==='external'?'外部网页生成结果':document.assets[item.outputAssetId]?.metadata.outputProvenance==='manual'?'人工上传结果':model.capabilities.generation?'生成输出':'输出媒体'}<span><PixelIcon name="chevron"/></span></div>}
         {model.capabilities.generation && latestJob(item.id) && <div className="job-detail"><PixelProgress value={latestJob(item.id)!.progress} label={stateTitles[latestJob(item.id)!.state] ?? '生成任务'}/>{latestJob(item.id)!.error&&<p className="pixel-description">{latestJob(item.id)!.error!.message}</p>}</div>}
       </>}
     </div>;
@@ -626,6 +666,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   </>;
 
   return <PixelWindowHost data-testid="project-workspace" onDragOverCapture={projectDragOver} onDropCapture={event=>{void projectDrop(event);}} onDragEnd={()=>endDrag()} title={<div className="project-name" tabIndex={0} role="group" aria-label="作品详情" onDoubleClick={()=>open(projectRef)} onKeyDown={event=>objectKeys(event,projectRef)}><PixelIcon name="folder"/>{document?.title ?? '正在打开作品'}</div>} controls={<WindowControls/>}>
+    <input ref={mediaPicker} type="file" aria-label="时间线媒体文件" accept={referenceFormats[mediaPickerKind].accept.join(',')} hidden disabled={pending>0} onChange={event=>{const file=event.target.files?.[0];const target=mediaPickerTarget.current;mediaPickerTarget.current=undefined;event.target.value='';if(file&&target)void placeFileAtTarget(file,target);}}/>
     <main className="workbench-main">
       
       <div className="upper-workspace">
@@ -665,7 +706,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
                   {timeline.itemIds.map(id=>{const item=document!.items[id];if(!item)return null;const view=resize?.id===id?resize:item;const job=latestJob(id);const ref:ObjectRef={kind:'item',projectId:projectId,id};
                     return <div key={id} className={`timeline-item timeline-item--${kind} ${selected?.kind==='item'&&selected.id===id?'timeline-item--selected':''}`} data-testid="timeline-item" data-item-id={id}
                       style={{left:view.startTick/timeline.ticksPerSecond*PX_PER_SECOND,width:Math.max(24,view.durationTicks/timeline.ticksPerSecond*PX_PER_SECOND)}} draggable tabIndex={0} role="group" aria-label={`片段 ${itemTitle(item)}`}
-                      onClick={()=>{if(host.navigator.isInteractive(undefined)){setSelected(ref);seekPlayback(item.startTick/timeline.ticksPerSecond*1000);}}} onDoubleClick={()=>open(ref)} onKeyDown={event=>objectKeys(event,ref)} onContextMenu={event=>context(event,ref)} onDragStart={event=>beginDrag(event,{role:'item',payload:{object:ref as {kind:'item';projectId:string;id:string}}},timeline.ticksPerSecond)}>
+                      onClick={()=>{if(host.navigator.isInteractive(undefined)){setSelected(ref);seekPlayback(item.startTick/timeline.ticksPerSecond*1000);}}} onDoubleClick={()=>open(ref)} onKeyDown={event=>objectKeys(event,ref)} onContextMenu={event=>{const track=event.currentTarget.closest<HTMLElement>('[data-testid="timeline-track"]');context(event,ref,undefined,false,{role:'timeline.position',startTick:positionTick(event.clientX,track?.getBoundingClientRect().left??event.currentTarget.getBoundingClientRect().left,timeline.ticksPerSecond)});}} onDragStart={event=>beginDrag(event,{role:'item',payload:{object:ref as {kind:'item';projectId:string;id:string}}},timeline.ticksPerSecond)}>
                       <div className="item-edge item-edge--start" data-testid="item-edge-start" onPointerDown={event=>resizeBegin(event,item,'start')}/>
                       <div className="item-body"><span className="item-title"><PixelIcon name={iconFor(kind)}/>{itemTitle(item)}</span><span className="item-caption">{time(view.durationTicks/timeline.ticksPerSecond)} <span>·</span> {job?stateTitles[job.state]:item.outputAssetId?'就绪':model?.capabilities.generation?'草稿':'参考文本'}</span></div>
                       {hasReferenceContext(item,model)&&<div className="item-reference" title="参考素材" data-testid="item-reference-drop" onDragOver={event=>dragOver(event,refTarget(id))} onDrop={event=>drop(event,refTarget(id))}><PixelIcon name="reference"/><span>{item.referenceAssetIds.length}</span></div>}

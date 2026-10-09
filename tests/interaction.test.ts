@@ -184,7 +184,7 @@ test('local text uses the same creation/edit relationships and does not acquire 
   const item=plugin.createItem({timeline,id:'note',startTick:0,durationTicks:5000,params:{text:'镜头参考'},generationToken:'text:1'});
   timeline.itemIds.push(item.id);project.document.timelines[timeline.id]=timeline;project.document.items[item.id]=item;
   const context:ContextActionContext={project,target:{kind:'item',projectId:'project',id:item.id}};
-  assert.deepEqual(host.menu.list(context).map(action=>action.id),['item.duplicate','item.delete']);
+  assert.deepEqual(host.menu.list(context).map(action=>action.id),['timeline.create','item.duplicate','item.delete']);
   const position:ContextActionContext={project,target:{kind:'timeline',projectId:'project',id:timeline.id},data:{role:'timeline.position',startTick:1500}};
   assert.equal(host.menu.commandFor('item.createDraft',position)?.type,'item.createDraft');
   assert.equal(host.menu.commandFor('timeline.refreshDefaults',{...position,data:{}}),undefined);
@@ -211,6 +211,17 @@ test('disk media import and placement use one registry, enforce local type and d
   assert.equal(host.drag.drop({...library,source:{role:'external.media',payload:{object:{kind:'project',projectId:'foreign'},kind:'image'}}}),undefined);
   host.navigator.open({kind:'item',projectId:'project',id:'item'});
   assert.equal(host.drag.hover(blank).status,'hidden');assert.equal(host.drag.drop(library),undefined);
+});
+
+test('new timeline uses the same project command from blank space, existing rows and Items, and is unavailable in details',()=>{
+  const host=interaction();const project=referenceProject();
+  for(const target of [{kind:'project' as const,projectId:'project'},{kind:'timeline' as const,projectId:'project',id:'timeline'},{kind:'item' as const,projectId:'project',id:'item'}]) {
+    assert.deepEqual(host.menu.commandFor('timeline.create',{project,target}),{type:'timeline.create',payload:{}});
+  }
+  assert.equal(host.paths.getPath('timeline.create'),'context:timeline.create');
+  const frame=host.navigator.open({kind:'item',projectId:'project',id:'item'});
+  assert.equal(host.menu.commandFor('timeline.create',{project,target:frame.object,scopeId:frame.scopeId}),undefined);
+  assert.equal(host.menu.commandFor('timeline.create',{project,target:{kind:'project',projectId:'project'}}),undefined);
 });
 
 test('edge resizing accepts only its own item and a safe positive tick interval',()=>{

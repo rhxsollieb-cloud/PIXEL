@@ -1,9 +1,9 @@
 import { app, dialog, ipcMain, Menu, session } from 'electron';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { readFile, writeFile, mkdir, rename, unlink, stat } from 'node:fs/promises';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startWorkbenchServer, preparePixelProjectLocation } from './backend.mjs';
+import { startWorkbenchServer, preparePixelProjectLocation, FileArtifactStore } from './backend.mjs';
 import { ExportTickets } from './export-tickets.mjs';
 import { DesktopWindowHost } from './window-host.mjs';
 import { ObjectDragBroker } from './object-drag-broker.mjs';
@@ -119,6 +119,7 @@ async function createProjectRuntime(directory, initial) {
     directory, apiPort: 0, frontendDirectory: join(appDirectory, 'dist'), sessionToken: token,
     ...(initial ? { initial } : {}),
     envPath: join(app.isPackaged ? app.getPath('userData') : appDirectory, '.env'),
+    ...(process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test' ? { artifacts: new FileArtifactStore(join(directory, 'artifacts')) } : {}),
   });
   const address = next.server.address();
   if (!address || typeof address === 'string') {
@@ -180,7 +181,10 @@ async function openDroppedProject(event, request) {
   const previous = { runtime, url: baseUrl, directory: activeDirectory, token: activeToken };
   let next;
   try {
-    const location = await preparePixelProjectLocation(request?.path);
+    const targetArtifacts = process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test'
+      ? new FileArtifactStore(join((await stat(request?.path)).isDirectory() ? request.path : dirname(request.path), 'artifacts'))
+      : runtime.workbench.artifacts;
+    const location = await preparePixelProjectLocation(request?.path, { artifacts: targetArtifacts });
     if (closing || !host.alive) return { ok: false, error: '窗口已关闭' };
     if (location.directory === activeDirectory) return { ok: true, title: currentSnapshot.document.title };
     next = await createProjectRuntime(location.directory, location.initial);
@@ -231,7 +235,10 @@ async function start() {
   let location = { directory: process.env.PIXEL_STORAGE_DIR || join(app.getPath('userData'), 'project') };
   try {
     const saved = JSON.parse(await readFile(join(app.getPath('userData'), 'last-project.json'), 'utf8'));
-    if (saved.version === 1 && typeof saved.directory === 'string' && isAbsolute(saved.directory)) location = await preparePixelProjectLocation(saved.directory);
+    if (saved.version === 1 && typeof saved.directory === 'string' && isAbsolute(saved.directory)) location = await preparePixelProjectLocation(saved.directory, {
+      envPath: join(app.isPackaged ? app.getPath('userData') : appDirectory, '.env'),
+      ...(process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test' ? { artifacts: new FileArtifactStore(join(saved.directory, 'artifacts')) } : {}),
+    });
   } catch { /* Unavailable remembered projects do not replace the fallback project. */ }
   await bindProject(await createProjectRuntime(location.directory, location.initial));
   desktopSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {

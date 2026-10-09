@@ -42,6 +42,8 @@ export interface ArtifactWriteRequest {
   kind: MediaKind;
   bytes: Uint8Array | AsyncIterable<Uint8Array>;
   metadata: JsonObject;
+  /** Runtime-only cancellation; never persisted in project or artifact JSON. */
+  signal?: AbortSignal;
 }
 
 /** 宿主产生资源 ID 和 fileRef，provider 无法选择任意文件系统路径。 */
@@ -70,6 +72,14 @@ export interface ProviderRunContext {
 
 export interface MediaReader {
   read(asset: DeepReadonly<AssetData>, signal: AbortSignal): Promise<{ bytes: Uint8Array; mimeType: string }>;
+}
+
+/** Resource storage is independent of project/operation ledgers and native export files. */
+export interface MediaArtifactStore extends ArtifactStore, MediaReader {
+  stat(asset: DeepReadonly<AssetData>, signal?: AbortSignal): Promise<{ byteLength: number; mimeType: string }>;
+  readRange(asset: DeepReadonly<AssetData>, range: { start: number; end: number }, signal: AbortSignal): Promise<{ bytes: Uint8Array; mimeType: string; totalBytes: number }>;
+  /** Present only on the explicit filesystem test/legacy migration adapter. */
+  resolvePath?(asset: DeepReadonly<AssetData>): Promise<string>;
 }
 
 /** 已解析的正文边界；供应商时间戳适配与真实音频编解码是两个可替换边界。 */
@@ -247,7 +257,7 @@ export abstract class BaseModelProvider {
                 || writeRequest.attemptToken.attempt !== context.attemptToken.attempt) {
               throw new ProviderError('INVALID_OUTPUT', '产物不属于当前执行 attempt');
             }
-            const artifact = await context.artifacts.write(writeRequest);
+            const artifact = await context.artifacts.write({ ...writeRequest, signal: controller.signal });
             if (artifact.jobId !== context.attemptToken.jobId || !artifact.id) {
               throw new ProviderError('INVALID_OUTPUT', '宿主返回了错误的产物归属');
             }

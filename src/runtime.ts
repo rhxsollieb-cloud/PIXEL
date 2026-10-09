@@ -3,11 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { OpenRouter } from '@openrouter/sdk';
 import type { DeepReadonly, GenerationJob, GenerationRequest } from './contracts.js';
 import { generationRequestSchema } from './contracts.js';
-import { BaseModelProvider, ProviderError, transitionJob, type GenerationProgress } from './generation.js';
+import { BaseModelProvider, ProviderError, transitionJob, type GenerationProgress, type MediaArtifactStore } from './generation.js';
 import { modelRegistry } from './models.js';
 import { ElevenLabsModelProvider } from './providers/elevenlabs.js';
 import { OpenRouterModelProvider } from './providers/openrouter.js';
-import { FileArtifactStore, FileJobRepository } from './storage.js';
+import { FileJobRepository } from './storage.js';
 import type { BackendConfiguration } from './backend-configuration.js';
 import { generationInputFingerprint } from './generation-fingerprint.js';
 export { loadBackendConfiguration, type BackendConfiguration } from './backend-configuration.js';
@@ -39,7 +39,7 @@ export class GenerationRunner {
   constructor(
     readonly providers: ProviderRegistry,
     readonly jobs: FileJobRepository,
-    readonly artifacts: FileArtifactStore,
+    readonly artifacts: MediaArtifactStore,
   ) {}
 
   async run(request: DeepReadonly<GenerationRequest>, options: RunGenerationOptions = {}): Promise<GenerationJob> {
@@ -161,12 +161,12 @@ export class GenerationRunner {
   }
 }
 
-export function createModelBackend(configuration: BackendConfiguration): GenerationRunner {
+export function createModelBackend(configuration: BackendConfiguration, artifacts: MediaArtifactStore): GenerationRunner {
   const providers = new ProviderRegistry();
   providers.register(new ElevenLabsModelProvider({ apiKey: configuration.elevenlabsApiKey }));
   providers.register(new OpenRouterModelProvider(new OpenRouter({ apiKey: configuration.openrouterApiKey })));
   return new GenerationRunner(providers,
     new FileJobRepository(join(configuration.storageDirectory, 'jobs')),
-    new FileArtifactStore(join(configuration.storageDirectory, 'artifacts')),
+    artifacts,
   );
 }

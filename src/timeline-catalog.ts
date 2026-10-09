@@ -14,7 +14,7 @@ export interface TimelineDeclaration {
   description: string;
   draftTitle?: string;
   itemKind: string;
-  capabilities: { generation: boolean; mediaPlacement: boolean; references: boolean };
+  capabilities: { generation: boolean; mediaPlacement: boolean; references: boolean; manualOutput?: boolean };
   supportedActions: string[];
   referenceTextFields: string[];
   requiredTextFields?: readonly string[];

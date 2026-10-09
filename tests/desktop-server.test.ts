@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startWorkbenchServer } from '../src/server.js';
+import { FileArtifactStore } from '../src/storage.js';
 
 test('desktop renderer and API share one authenticated loopback host and static files stay within dist', async context => {
   const directory = await mkdtemp(join(tmpdir(), 'pixel-desktop-'));
@@ -16,6 +17,7 @@ test('desktop renderer and API share one authenticated loopback host and static 
   const { server, workbench } = await startWorkbenchServer({
     directory: join(directory, 'project'), apiPort: 0, frontendDirectory: frontend,
     sessionToken: 'trusted-session', providers: { elevenlabs: false, openrouter: false },
+    artifacts: new FileArtifactStore(join(directory, 'project', 'artifacts')),
   });
   context.after(async () => {
     await workbench.shutdown(); server.closeAllConnections();

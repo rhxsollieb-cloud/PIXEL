@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import type { ActionResult, JsonObject } from '../src/contracts.js';
-import { createWorkbench, captureGenerationRequest, type Workbench } from '../src/workbench.js';
+import { createWorkbench, captureGenerationRequest, type Workbench } from './local-workbench.js';
 import { builtinModelDescriptors, modelRegistry, ModelRegistry, type ModelDescriptor } from '../src/models.js';
 import { LocalMediaTimelinePlugin, TextTimelinePlugin } from '../src/plugins.js';
 import { referenceLimit, timelineRegistry } from '../src/timeline-catalog.js';
@@ -129,7 +129,7 @@ test('external media placement creates asset, ordinary timeline and real output 
   assert.deepEqual(await reopened.placeExternalMedia(input), first); assert.deepEqual(await reopened.snapshot(), snapshot);
   const reused = await reopened.placeExternalMedia({ ...input, startTick: 2000 }); assert.equal(reused.ok, false);
   if (!reused.ok) assert.equal(reused.error.code, 'REQUEST_ID_REUSED');
-  assert.deepEqual(await readFile(await reopened.artifacts.resolvePath(snapshot.document.assets[String(first.outcome.assetId)]!)), png);
+  assert.deepEqual((await reopened.artifacts.read(snapshot.document.assets[String(first.outcome.assetId)]!, new AbortController().signal)).bytes, png);
   const file = JSON.parse(await readFile(join(root, 'project.json'), 'utf8')) as { history: unknown[] };
   assert.equal(file.history.length, 1);
 });

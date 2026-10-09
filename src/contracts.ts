@@ -66,8 +66,8 @@ export interface TimelineItemData {
   generationSettings?: JsonObject;
   referenceAssetIds: string[];
   outputAssetId?: string;
-  /** 放置已有素材与由当前生成输入得到的输出具有不同的失效语义。 */
-  outputOrigin?: 'placement' | 'generated';
+  /** 人工上传与已有素材保留编辑意图；只有生成输出随生成输入失效。 */
+  outputOrigin?: 'placement' | 'generated' | 'manual';
   /** 每次影响生成输入的编辑或重新生成都换 token，撤销也不能复用旧 token。 */
   generationToken: string;
 }

@@ -7,6 +7,8 @@ import type { GenerationReference, GenerationRequest, JsonObject } from '../src/
 import { ProviderError } from '../src/generation.js';
 import { modelRegistry } from '../src/models.js';
 import { createModelBackend, loadBackendConfiguration } from '../src/runtime.js';
+import { loadSeafileConfiguration } from '../src/backend-configuration.js';
+import { SeafileArtifactStore } from '../src/seafile-storage.js';
 
 async function jsonObjectFile(path: string): Promise<JsonObject> {
   if ((await stat(path)).size > 1024 * 1024) throw new ProviderError('INVALID_INPUT', '参数文件超过大小上限');
@@ -32,7 +34,7 @@ async function main() {
   }
   if (values.model && values.resume) throw new ProviderError('INVALID_INPUT', '新建任务和恢复任务不能同时指定');
   const configuration = await loadBackendConfiguration({ ...(values['storage-dir'] ? { storageDirectory: values['storage-dir'] } : {}) });
-  const backend = createModelBackend(configuration);
+  const backend = createModelBackend(configuration, await SeafileArtifactStore.open(await loadSeafileConfiguration()));
   const controller = new AbortController();
   const cancel = () => controller.abort();
   process.once('SIGINT', cancel);
@@ -80,7 +82,7 @@ async function main() {
     if (job.error) console.error(`${job.error.code}: ${job.error.message}`);
     for (const id of job.artifactIds) {
       const artifact = await backend.artifacts.get(id);
-      if (artifact) console.log(await backend.artifacts.resolvePath(artifact.asset));
+      if (artifact) console.log(artifact.asset.fileRef);
     }
     if (job.state !== 'succeeded') process.exitCode = 1;
   } finally { process.removeListener('SIGINT', cancel); }

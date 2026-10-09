@@ -148,6 +148,7 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
   }
 
   async write(input: ArtifactWriteRequest): Promise<GenerationArtifact> {
+    input.signal?.throwIfAborted();
     const mimeType = input.metadata.mimeType;
     const format = typeof mimeType === 'string' && Object.hasOwn(formats, mimeType) ? formats[mimeType] : undefined;
     if (!format || format.kind !== input.kind) throw new ProviderError('INVALID_OUTPUT', '产物 MIME 类型与媒体种类不一致');
@@ -165,6 +166,7 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
       try {
         const chunks = input.bytes instanceof Uint8Array ? [input.bytes] : input.bytes;
         for await (const chunk of chunks) {
+          input.signal?.throwIfAborted();
           if (!(chunk instanceof Uint8Array)) throw new ProviderError('INVALID_OUTPUT', '产物流必须返回字节');
           size += chunk.byteLength;
           if (size > this.maxBytes) throw new ProviderError('INVALID_OUTPUT', '产物超过宿主大小上限');
@@ -179,6 +181,7 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
         await handle.sync();
       } finally { await handle.close(); }
       await rename(temporary, mediaPath);
+      input.signal?.throwIfAborted();
       const artifact: GenerationArtifact = {
         id: artifactId, jobId: input.attemptToken.jobId,
         asset: {
@@ -241,5 +244,33 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
     signal.throwIfAborted();
     const artifact = await this.get(asset.id);
     return { bytes, mimeType: String(artifact!.asset.metadata.mimeType) };
+  }
+
+  async stat(asset: DeepReadonly<AssetData>, signal?: AbortSignal): Promise<{ byteLength: number; mimeType: string }> {
+    signal?.throwIfAborted();
+    const path = await this.resolvePath(asset);
+    const info = await stat(path);
+    const artifact = await this.get(asset.id);
+    signal?.throwIfAborted();
+    return { byteLength: info.size, mimeType: String(artifact!.asset.metadata.mimeType) };
+  }
+
+  async readRange(asset: DeepReadonly<AssetData>, range: { start: number; end: number }, signal: AbortSignal): Promise<{ bytes: Uint8Array; mimeType: string; totalBytes: number }> {
+    const info = await this.stat(asset, signal);
+    if (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.start < 0 || range.end < range.start || range.end >= info.byteLength) {
+      throw new ProviderError('INVALID_INPUT', '媒体读取范围无效');
+    }
+    const handle = await open(await this.resolvePath(asset), 'r');
+    try {
+      const bytes = new Uint8Array(range.end - range.start + 1);
+      let offset = 0;
+      while (offset < bytes.length) {
+        signal.throwIfAborted();
+        const read = await handle.read(bytes, offset, bytes.length - offset, range.start + offset);
+        if (!read.bytesRead) throw new ProviderError('INVALID_OUTPUT', '媒体读取未完成');
+        offset += read.bytesRead;
+      }
+      return { bytes, mimeType: info.mimeType, totalBytes: info.byteLength };
+    } finally { await handle.close(); }
   }
 }

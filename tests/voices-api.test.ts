@@ -5,6 +5,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { startWorkbenchServer } from '../src/server.js';
+import { FileArtifactStore } from '../src/storage.js';
 import { VoiceService, type VoiceProvider } from '../src/voices.js';
 import type { Workbench } from '../src/workbench.js';
 
@@ -37,6 +38,7 @@ async function setup(t: TestContext, configured = true) {
   };
   const voices = configured ? new VoiceService(provider, join(directory, 'voice-operations')) : undefined;
   const { server, workbench } = await startWorkbenchServer({ directory, apiPort: 0, sessionToken: 'voice_api_session',
+    artifacts: new FileArtifactStore(join(directory, 'artifacts')),
     providers: { elevenlabs: false, openrouter: false }, ...(voices ? { voices } : {}) });
   t.after(async () => {
     await workbench.shutdown(); server.closeAllConnections();
