@@ -10,7 +10,8 @@ import type { ActionEnvelope, ActionResult, DeepReadonly, GenerationRequest } fr
 import { BaseModelProvider, waitForProvider, transitionJob, type ProviderRunContext } from '../src/generation.js';
 import { GenerationRunner, ProviderRegistry } from '../src/runtime.js';
 import { FileArtifactStore, FileJobRepository } from '../src/storage.js';
-import { createWorkbench, createInitialWorkbenchProject, WORKBENCH_PROJECT_ID, type Workbench } from '../src/workbench.js';
+import { createWorkbench, createInitialWorkbenchProject, captureGenerationRequest, WORKBENCH_PROJECT_ID, type Workbench } from '../src/workbench.js';
+import { modelRegistry } from '../src/models.js';
 import { createApiServer } from '../src/server.js';
 import { createWorkbenchFixture } from './workbench-fixtures.js';
 
@@ -47,7 +48,7 @@ class MockImageProvider extends BaseModelProvider {
     return { artifactIds: [artifact.id] };
   }
 }
-function runner(root: string, provider: MockImageProvider): GenerationRunner {
+function runner(root: string, provider: BaseModelProvider): GenerationRunner {
   const registry = new ProviderRegistry(); registry.register(provider);
   return new GenerationRunner(registry, new FileJobRepository(join(root, 'jobs')), new FileArtifactStore(join(root, 'artifacts')));
 }
@@ -164,7 +165,11 @@ test('input edits invalidate only relevant item tokens; project title and placem
   assert.deepEqual(Object.fromEntries(Object.values((await workbench.snapshot()).document.items).map(value => [value.id, value.generationToken])), tokens);
   success(await action(workbench, 'timeline.settings', { timelineId: item.timelineId, settings: { resolution: '2K' } }));
   const after = await workbench.snapshot();
-  assert.notEqual(after.document.items[item.id]!.generationToken, tokens[item.id]);
+  assert.equal(after.document.items[item.id]!.generationToken, tokens[item.id]);
+  assert.equal(after.document.items[item.id]!.generationSettings?.resolution, '1K');
+  success(await action(workbench, 'timeline.refreshDefaults', { timelineId: item.timelineId }));
+  assert.notEqual((await workbench.snapshot()).document.items[item.id]!.generationToken, tokens[item.id]);
+  assert.equal((await workbench.snapshot()).document.items[item.id]!.generationSettings?.resolution, '2K');
   for (const other of Object.values(after.document.items)) if (other.id !== item.id) assert.equal(other.generationToken, tokens[other.id]);
 });
 
@@ -390,4 +395,194 @@ test('SSE publishes authoritative project revisions and disconnect cleans the su
   const text = new TextDecoder().decode(part.value);
   assert.match(text, /project.changed/); assert.match(text, new RegExp(`"revision":${receipt.revision}`));
   abort.abort(); await reader.cancel().catch(() => {});
+});
+
+test('timeline defaults preserve existing values; explicit refresh is atomic, scoped, durable and idempotent', async context => {
+  const root = await directory(context);
+  const initial = createInitialWorkbenchProject();
+  const plugin = modelRegistry.createPlugin('eleven_v4');
+  const timeline = plugin.createTimeline({ id: 'speech', modelId: 'eleven_v4', ticksPerSecond: 1000, settings: {} });
+  initial.document.timelines[timeline.id] = timeline;
+  const store = new FileArtifactStore(join(root, 'artifacts'));
+  const wav = Buffer.alloc(46);
+  wav.write('RIFF', 0); wav.writeUInt32LE(38, 4); wav.write('WAVEfmt ', 8);
+  wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(44100, 24); wav.writeUInt32LE(88200, 28); wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(2, 40);
+  const source = await store.write({ attemptToken: { jobId: 'fixture_source', attempt: 1 }, bytes: wav, kind: 'audio', metadata: { providerId: 'elevenlabs', mimeType: 'audio/wav' } });
+  const generated = await store.write({ attemptToken: { jobId: 'fixture_generated', attempt: 1 }, bytes: wav, kind: 'audio', metadata: { providerId: 'elevenlabs', mimeType: 'audio/wav' } });
+  const sourceId = source.asset.id; const generatedId = generated.asset.id;
+  initial.document.assets[sourceId] = source.asset;
+  initial.document.assets[generatedId] = generated.asset;
+  for (const [index, id] of ['draft', 'placement', 'generated'].entries()) {
+    const item = plugin.createItem({ timeline, id, startTick: index * 5000, durationTicks: 5000,
+      params: { text: `正文${id}`, voiceId: 'old-voice', trimTail: false, tailPaddingMs: 170 }, generationToken: `old-${id}` });
+    if (id === 'placement') { item.outputAssetId = sourceId; item.outputOrigin = 'placement'; }
+    if (id === 'generated') { item.outputAssetId = generatedId; item.outputOrigin = 'generated'; }
+    initial.document.items[id] = item; timeline.itemIds.push(id);
+  }
+  const workbench = await createWorkbench({ directory: root, initial }); context.after(() => workbench.close());
+  const oldItems = structuredClone((await workbench.snapshot()).document.items);
+  success(await action(workbench, 'timeline.defaults', { timelineId: timeline.id, itemDefaults: { voiceId: 'new-voice' } }));
+  assert.deepEqual((await workbench.snapshot()).document.items, oldItems);
+  assert.deepEqual(await workbench.jobs(), { items: [] });
+  const created = success(await action(workbench, 'item.createDraft', { timelineId: timeline.id, startTick: 15000 }));
+  const newItem = (await workbench.snapshot()).document.items[String(created.outcome.itemId)]!;
+  assert.equal(newItem.params.voiceId, 'new-voice'); assert.equal(newItem.params.trimTail, true);
+  assert.deepEqual((await workbench.snapshot()).document.timelines.speech!.itemDefaults, { voiceId: 'new-voice' });
+  const refresh = await envelope(workbench, 'timeline.refreshDefaults', { timelineId: timeline.id });
+  const receipt = success(await workbench.execute(refresh));
+  assert.deepEqual(receipt.outcome.changedItemIds, ['draft', 'placement', 'generated']);
+  const after = await workbench.snapshot();
+  for (const id of timeline.itemIds) {
+    const item = after.document.items[id]!; const old = oldItems[id]!;
+    assert.equal(item.params.text, old.params.text); assert.equal(item.params.voiceId, 'new-voice');
+    assert.equal(item.params.trimTail, newItem.params.trimTail);
+    assert.equal(item.params.tailPaddingMs, newItem.params.tailPaddingMs);
+    assert.equal(item.startTick, old.startTick); assert.equal(item.durationTicks, old.durationTicks);
+    assert.deepEqual(item.referenceAssetIds, old.referenceAssetIds);
+    assert.notEqual(item.generationToken, old.generationToken);
+  }
+  assert.equal(after.document.items.placement!.outputAssetId, sourceId);
+  assert.equal(after.document.items.generated!.outputAssetId, undefined);
+  assert.ok(after.document.assets[generatedId]);
+  assert.deepEqual(await workbench.execute(refresh), receipt);
+  assert.deepEqual(await workbench.snapshot(), after);
+  const reopened = await createWorkbench({ directory: root }); context.after(() => reopened.close());
+  assert.deepEqual(await reopened.execute(refresh), receipt);
+  const repeated = success(await action(reopened, 'timeline.refreshDefaults', { timelineId: timeline.id }));
+  assert.deepEqual(repeated.outcome.changedItemIds, []);
+  assert.deepEqual((await reopened.snapshot()).document.items, after.document.items);
+  const beforeInvalid = await reopened.snapshot();
+  for (const itemDefaults of [{ text: 'forbidden' }, { voiceSettings: { speed: 1.2 } }, { unknown: true }]) {
+    const rejected = await action(reopened, 'timeline.defaults', { timelineId: timeline.id, itemDefaults });
+    assert.equal(rejected.ok, false); if (!rejected.ok) assert.equal(rejected.error.code, 'INVALID_INPUT');
+    assert.deepEqual(await reopened.snapshot(), beforeInvalid);
+  }
+});
+
+test('legacy item settings remain unchanged when defaults change; refreshing alone applies new defaults', async context => {
+  const initial = createWorkbenchFixture();
+  const item = imageItem(initial); delete item.generationSettings;
+  const originalSettings = structuredClone(initial.document.timelines[item.timelineId]!.settings);
+  const workbench = await createWorkbench({ directory: await directory(context), initial }); context.after(() => workbench.close());
+  const before = captureGenerationRequest(initial.document, item);
+  success(await action(workbench, 'timeline.settings', { timelineId: item.timelineId, settings: { resolution: '2K' } }));
+  const modified = await workbench.snapshot();
+  assert.deepEqual(modified.document.items[item.id]!.generationSettings, originalSettings);
+  assert.equal(captureGenerationRequest(modified.document, modified.document.items[item.id]!).inputFingerprint, before.inputFingerprint);
+  assert.equal(modified.document.items[item.id]!.generationToken, item.generationToken);
+  const draft = success(await action(workbench, 'item.createDraft', { timelineId: item.timelineId, startTick: 6000 }));
+  assert.equal((await workbench.snapshot()).document.items[String(draft.outcome.itemId)]!.generationSettings?.resolution, '2K');
+  success(await action(workbench, 'timeline.refreshDefaults', { timelineId: item.timelineId }));
+  const refreshed = await workbench.snapshot();
+  assert.equal(refreshed.document.items[item.id]!.generationSettings?.resolution, '2K');
+  assert.notEqual(captureGenerationRequest(refreshed.document, refreshed.document.items[item.id]!).inputFingerprint, before.inputFingerprint);
+});
+
+test('refresh validates every item before committing any changes when music modes conflict with defaults', async context => {
+  const initial = createInitialWorkbenchProject(); const plugin = modelRegistry.createPlugin('music_v2_5');
+  const timeline = plugin.createTimeline({ id: 'music', modelId: 'music_v2_5', ticksPerSecond: 1000, settings: {} });
+  initial.document.timelines[timeline.id] = timeline;
+  const promptItem = plugin.createItem({ timeline, id: 'prompt-mode', startTick: 0, durationTicks: 5000, params: { prompt: 'piano' }, generationToken: 'prompt-original' });
+  const planItem = plugin.createItem({ timeline, id: 'plan-mode', startTick: 5000, durationTicks: 5000,
+    params: { compositionPlan: { chunks: [{ text: '', durationMs: 5000, positiveStyles: ['piano'] }] } }, generationToken: 'plan-original' });
+  initial.document.items[promptItem.id] = promptItem; initial.document.items[planItem.id] = planItem;
+  timeline.itemIds.push(promptItem.id, planItem.id);
+  const workbench = await createWorkbench({ directory: await directory(context), initial }); context.after(() => workbench.close());
+  success(await action(workbench, 'timeline.defaults', { timelineId: timeline.id, itemDefaults: { forceInstrumental: true } }));
+  const beforeRefresh = await workbench.snapshot();
+  const rejected = await action(workbench, 'timeline.refreshDefaults', { timelineId: timeline.id });
+  assert.equal(rejected.ok, false); if (!rejected.ok) assert.equal(rejected.error.code, 'INVALID_INPUT');
+  assert.deepEqual(await workbench.snapshot(), beforeRefresh);
+  assert.deepEqual(await workbench.jobs(), { items: [] });
+});
+
+test('speech capture uses same-voice temporal neighbors, reference-only text and bounded Unicode contexts', async context => {
+  const initial = createInitialWorkbenchProject();
+  const plugin = modelRegistry.createPlugin('eleven_v4');
+  const timeline = plugin.createTimeline({ id: 'speech', modelId: 'eleven_v4', ticksPerSecond: 1000, settings: {} });
+  initial.document.timelines[timeline.id] = timeline;
+  const entries = [
+    { id: 'previous', startTick: 0, text: '前'.repeat(20) + '🙂'.repeat(100), voiceId: 'voice' },
+    { id: 'other-voice', startTick: 5000, text: '不兼容声线', voiceId: 'other' },
+    { id: 'target', startTick: 10000, text: '正文', voiceId: 'voice' },
+    { id: 'next', startTick: 15000, text: '后'.repeat(120), voiceId: 'voice' },
+  ];
+  for (const entry of entries) {
+    const item = plugin.createItem({ timeline, id: entry.id, startTick: entry.startTick, durationTicks: 5000, params: { text: entry.text, voiceId: entry.voiceId }, generationToken: `token-${entry.id}` });
+    initial.document.items[item.id] = item; timeline.itemIds.unshift(item.id);
+  }
+  const workbench = await createWorkbench({ directory: await directory(context), initial }); context.after(() => workbench.close());
+  const target = initial.document.items.target!;
+  const first = captureGenerationRequest(initial.document, target);
+  assert.deepEqual(first.context, { nextText: '后'.repeat(100) });
+  // A-B-A cannot leap across the B voice to take the earlier A as context.
+  const withoutBoundary = structuredClone(initial.document);
+  delete withoutBoundary.items['other-voice'];
+  withoutBoundary.timelines.speech!.itemIds = withoutBoundary.timelines.speech!.itemIds.filter(id => id !== 'other-voice');
+  assert.deepEqual(captureGenerationRequest(withoutBoundary, withoutBoundary.items.target!).context, { previousText: '🙂'.repeat(100), nextText: '后'.repeat(100) });
+  assert.equal(first.params.text, '正文'); assert.equal(first.durationMs, undefined);
+  success(await action(workbench, 'item.params', { itemId: 'other-voice', params: { text: '无关更新', voiceId: 'other' } }));
+  let snapshot = await workbench.snapshot();
+  assert.equal(captureGenerationRequest(snapshot.document, snapshot.document.items.target!).inputFingerprint, first.inputFingerprint);
+  success(await action(workbench, 'item.params', { itemId: 'next', params: { text: '后文变化', voiceId: 'voice' } }));
+  snapshot = await workbench.snapshot();
+  assert.equal(snapshot.document.items.target!.generationToken, target.generationToken);
+  assert.notEqual(captureGenerationRequest(snapshot.document, snapshot.document.items.target!).inputFingerprint, first.inputFingerprint);
+  success(await action(workbench, 'item.params', { itemId: 'target', params: { text: '正文', voiceId: 'voice', contextMode: 'manual', previousText: '手工前文', nextText: '手工后文' } }));
+  snapshot = await workbench.snapshot();
+  assert.deepEqual(captureGenerationRequest(snapshot.document, snapshot.document.items.target!).context, { previousText: '手工前文', nextText: '手工后文' });
+  success(await action(workbench, 'item.params', { itemId: 'target', params: { text: '正文', voiceId: 'voice', contextMode: 'none' } }));
+  snapshot = await workbench.snapshot();
+  assert.equal(captureGenerationRequest(snapshot.document, snapshot.document.items.target!).context, undefined);
+});
+
+test('late speech output cannot attach after neighboring text, voice, ordering or membership changes', async context => {
+  class MockSpeechProvider extends BaseModelProvider {
+    readonly manifest = { providerId: 'elevenlabs', providerVersion: '1', modelIds: ['eleven_v4'], supportsCancellation: false };
+    calls = 0;
+    captured?: DeepReadonly<GenerationRequest>;
+    constructor(private readonly gate: Promise<void>) { super({ timeoutMs: 3000 }); }
+    protected async performGeneration(request: DeepReadonly<GenerationRequest>, execution: ProviderRunContext) {
+      this.calls++; this.captured = request; await this.gate;
+      const wav = Buffer.alloc(46);
+      wav.write('RIFF', 0); wav.writeUInt32LE(38, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16);
+      wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(24000, 24); wav.writeUInt32LE(48000, 28);
+      wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(2, 40);
+      const artifact = await execution.artifacts.write({ attemptToken: execution.attemptToken, kind: 'audio', bytes: wav, metadata: { mimeType: 'audio/wav', providerId: 'elevenlabs' } });
+      return { artifactIds: [artifact.id] };
+    }
+  }
+  const mutations = [
+    { type: 'item.params', payload: { itemId: 'previous', params: { text: '修改前文', voiceId: 'voice' } } },
+    { type: 'item.params', payload: { itemId: 'previous', params: { text: '前文', voiceId: 'different-voice' } } },
+    { type: 'item.move', payload: { itemId: 'previous', startTick: 15000 } },
+    { type: 'item.delete', payload: { itemId: 'next' } },
+  ];
+  for (const mutation of mutations) {
+    const root = await directory(context); let release!: () => void;
+    const provider = new MockSpeechProvider(new Promise<void>(accept => { release = accept; }));
+    const initial = createInitialWorkbenchProject(); const plugin = modelRegistry.createPlugin('eleven_v4');
+    const timeline = plugin.createTimeline({ id: 'speech', modelId: 'eleven_v4', ticksPerSecond: 1000, settings: {} });
+    initial.document.timelines[timeline.id] = timeline;
+    for (const [index, id] of ['previous', 'target', 'next'].entries()) {
+      const item = plugin.createItem({ timeline, id, startTick: index * 5000, durationTicks: 5000, params: { text: `${id}正文`, voiceId: 'voice' }, generationToken: `original-${id}` });
+      initial.document.items[id] = item; timeline.itemIds.push(id);
+    }
+    const workbench = await createWorkbench({ directory: root, runner: runner(root, provider), initial });
+    context.after(() => { release(); workbench.close(); });
+    const submitted = success(await action(workbench, 'generation.submit', { itemId: 'target' }));
+    await waitUntil(async () => provider.calls === 1);
+    assert.deepEqual(provider.captured?.context, { previousText: 'previous正文', nextText: 'next正文' });
+    const targetToken = (await workbench.snapshot()).document.items.target!.generationToken;
+    success(await action(workbench, mutation.type, mutation.payload));
+    assert.equal((await workbench.snapshot()).document.items.target!.generationToken, targetToken);
+    release();
+    await waitUntil(async () => (await workbench.runner!.jobs.get(String(submitted.outcome.jobId)))?.state === 'succeeded');
+    await waitUntil(async () => (await workbench.repository.outbox()).length === 0);
+    assert.equal((await workbench.snapshot()).document.items.target!.outputAssetId, undefined, mutation.type);
+    assert.equal((await workbench.runner!.jobs.get(String(submitted.outcome.jobId)))!.artifactIds.length, 1);
+    await workbench.shutdown();
+  }
 });

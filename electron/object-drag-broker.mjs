@@ -8,6 +8,8 @@ function objectExists(object, snapshot) {
   return Boolean(record && Object.hasOwn(record, object.id));
 }
 function sourceOf(source, snapshot, offsetTicks) {
+  // A media type hint is not a persisted object and never authorizes a token.
+  if (source?.role === 'external.media') return undefined;
   const object = source?.payload?.object;
   if (!objectExists(object, snapshot) || !Number.isSafeInteger(offsetTicks) || offsetTicks < 0) return undefined;
   const ref = { kind: object.kind, projectId: object.projectId, ...(object.kind === 'project' ? {} : { id: object.id }) };
@@ -67,9 +69,11 @@ export class ObjectDragBroker {
     const data = this.resolve(receiverId, sessionId);
     if (data) this.#clear(); return data;
   }
-  end(senderId, sessionId) {
+  end(senderId, sessionId, canceled = false) {
     const session = this.#valid();
-    if (!session || session.sessionId !== sessionId || session.senderId !== senderId || session.endAt !== undefined) return;
+    if (!session || session.sessionId !== sessionId || session.senderId !== senderId) return;
+    if (canceled === true) { this.#clear(); return; }
+    if (session.endAt !== undefined) return;
     // Source dragend can arrive just before another renderer's drop; keep its
     // broadcast and token until the receiver atomically consumes or grace expires.
     session.endAt = this.now() + this.endGraceMs;

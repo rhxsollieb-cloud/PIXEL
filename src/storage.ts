@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, unlink, open } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { mkdir, readFile, readdir, realpath, rename, stat, unlink, open } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { generationRequestSchema, type AssetData, type DeepReadonly, type GenerationArtifact, type GenerationJob } from './contracts.js';
 import { assertJobTransition, ProviderError, type ArtifactStore, type ArtifactWriteRequest, type JobRepository, type JobUpdateGuard, type MediaReader } from './generation.js';
@@ -119,9 +119,32 @@ const formats: Readonly<Record<string, { extension: string; kind: AssetData['kin
 /** 媒体和 metadata 先保存后返回 fileRef，失败只清理本次未发布文件。 */
 export class FileArtifactStore implements ArtifactStore, MediaReader {
   private readonly directory: string;
+  private parentRoot: Promise<string> | undefined;
   constructor(directory: string, private readonly maxBytes = 512 * 1024 * 1024) {
     this.directory = resolve(directory);
     if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new ProviderError('INVALID_INPUT', '产物大小上限无效');
+  }
+
+  private async checkedDirectory(): Promise<string> {
+    const pending = this.parentRoot ??= realpath(dirname(this.directory));
+    let parent: string;
+    try { parent = await pending; }
+    catch (error) { if (this.parentRoot === pending) this.parentRoot = undefined; throw error; }
+    const actual = await realpath(this.directory);
+    const local = relative(parent, actual);
+    if (isAbsolute(local) || local === '..' || local.startsWith(`..${sep}`)) throw new ProviderError('INVALID_OUTPUT', '素材目录超出了项目存储范围');
+    return actual;
+  }
+
+  private async checkedPath(name: string): Promise<string> {
+    const root = await this.checkedDirectory();
+    const actual = await realpath(join(root, name));
+    const local = relative(root, actual);
+    const sameName = process.platform === 'win32' ? basename(actual).toLowerCase() === name.toLowerCase() : basename(actual) === name;
+    if (isAbsolute(local) || local === '..' || local.startsWith(`..${sep}`) || !sameName || !(await stat(actual)).isFile()) {
+      throw new ProviderError('INVALID_OUTPUT', '素材文件超出了受控存储范围');
+    }
+    return actual;
   }
 
   async write(input: ArtifactWriteRequest): Promise<GenerationArtifact> {
@@ -134,6 +157,7 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
     const temporary = `${mediaPath}.tmp`;
     const metadataPath = join(this.directory, `${artifactId}.json`);
     await mkdir(this.directory, { recursive: true });
+    await this.checkedDirectory();
     let published = false;
     try {
       const handle = await open(temporary, 'wx', 0o600);
@@ -175,7 +199,7 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
   async get(artifactId: string): Promise<GenerationArtifact | undefined> {
     if (!z.uuid().safeParse(artifactId).success) throw new ProviderError('INVALID_INPUT', '产物 ID 无效');
     try {
-      const artifact = artifactSchema.parse(JSON.parse(await readFile(join(this.directory, `${artifactId}.json`), 'utf8'))) as GenerationArtifact;
+      const artifact = artifactSchema.parse(JSON.parse(await readFile(await this.checkedPath(`${artifactId}.json`), 'utf8'))) as GenerationArtifact;
       if (artifact.id !== artifactId || artifact.asset.id !== artifactId || artifact.asset.fileRef !== `pixel-asset:${artifactId}`) {
         throw new ProviderError('INVALID_OUTPUT', '产物索引与文件句柄不一致');
       }
@@ -185,7 +209,7 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
 
   async listByJob(jobId: string): Promise<GenerationArtifact[]> {
     let files: string[];
-    try { files = await readdir(this.directory); }
+    try { files = await readdir(await this.checkedDirectory()); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
     const artifacts: GenerationArtifact[] = [];
     for (const file of files) {
@@ -207,7 +231,7 @@ export class FileArtifactStore implements ArtifactStore, MediaReader {
     if (!format || format.kind !== artifact.asset.kind || artifact.asset.metadata.extension !== format.extension) {
       throw new ProviderError('INVALID_OUTPUT', '已保存的产物格式无效');
     }
-    return join(this.directory, `${id}.${format.extension}`);
+    return this.checkedPath(`${id}.${format.extension}`);
   }
 
   async read(asset: DeepReadonly<AssetData>, signal: AbortSignal): Promise<{ bytes: Uint8Array; mimeType: string }> {

@@ -4,12 +4,19 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import ffmpeg from 'ffmpeg-static';
 import { FileWorkbenchRepository } from '../src/workbench.ts';
 import { createWorkbenchFixture } from '../tests/workbench-fixtures.ts';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const emptyStorage = await mkdtemp(join(tmpdir(), 'pixel-desktop-empty-'));
 const storage = await mkdtemp(join(tmpdir(), 'pixel-desktop-ui-'));
+const projectLocations = await mkdtemp(join(tmpdir(), 'pixel-desktop-project-'));
+const droppedDirectory = join(projectLocations, '测试 空项目');
+const foreignDirectory = join(projectLocations, '普通文件夹');
+const diskImage = join(projectLocations, 'desktop-export.png');
 const screenshots = join(root, '.pixel', 'screenshots');
 const testEntry = join(root, '.pixel', 'native-test-entry.mjs');
 const envFor = directory => {
@@ -62,10 +69,46 @@ async function nativeWindowDrop(sourcePage, source, targetPage, target, x, expec
     await receiver.detach();
   }
 }
+async function nativeFileDrop(page, target, file, position) {
+  const receiver = await page.context().newCDPSession(page);
+  try {
+    await page.bringToFront();
+    const box = await target.boundingBox(); assert.ok(box);
+    const data = { items: [], files: [file], dragOperationsMask: 17 };
+    for (const type of ['dragEnter', 'dragOver', 'drop']) {
+      await receiver.send('Input.dispatchDragEvent', { type, x: box.x + (position?.x ?? box.width / 2), y: box.y + (position?.y ?? box.height / 2), data });
+    }
+  } finally { await receiver.detach(); }
+}
+async function mouseViewerExport(page, expectedCount) {
+  const viewer = page.getByTestId('viewer');
+  await expect(viewer).toHaveAttribute('draggable', 'true');
+  const box = await viewer.boundingBox(); assert.ok(box);
+  await page.bringToFront();
+  await page.mouse.move(box.x + 50, box.y + 50);
+  await page.mouse.down();
+  try {
+    await page.mouse.move(box.x + 90, box.y + 50, { steps: 6 });
+    await expect.poll(() => desktop.evaluate(() => globalThis.__pixelNativeDrags.length)).toBe(expectedCount);
+  } finally { await page.mouse.up(); }
+}
+async function openLibraryWindow(page) {
+  const opened = desktop.waitForEvent('window');
+  await page.getByTestId('viewer').click({ button: 'right', position: { x: 120, y: 120 } });
+  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  const library = await opened;
+  await expect(library.getByTestId('library-window')).toBeVisible();
+  return library;
+}
 let desktop;
 try {
+  await mkdir(droppedDirectory);
+  await mkdir(foreignDirectory);
+  await writeFile(join(foreignDirectory, 'unrelated.txt'), 'Original unrelated file');
+  await writeFile(diskImage, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64'));
   await mkdir(screenshots, { recursive: true });
-  await writeFile(testEntry, "import { app } from 'electron';\nif (!process.env.PIXEL_TEST_APPDATA) throw new Error('Isolated test profile required');\napp.setPath('appData', process.env.PIXEL_TEST_APPDATA);\nawait import('../electron/main.mjs');\n");
+  // Keep native screenshot assertions independent of the test host's GPU driver.
+  await writeFile(testEntry, "import { app } from 'electron';\nif (!process.env.PIXEL_TEST_APPDATA) throw new Error('Isolated test profile required');\napp.disableHardwareAcceleration();\napp.setPath('appData', process.env.PIXEL_TEST_APPDATA);\nawait import('../electron/main.mjs');\n");
   desktop = await launch(emptyStorage);
   const emptyWorkspace = await desktop.firstWindow();
   await expect(emptyWorkspace.getByRole('group', { name: '作品详情', exact: true })).toContainText('未命名作品');
@@ -213,16 +256,20 @@ try {
   await expect(detail.getByLabel('画面与风格描述')).toHaveValue(prompt);
   const saved = JSON.parse(await readFile(join(storage, 'project.json'), 'utf8'));
   assert.equal(saved.snapshot.document.items[itemId].params.prompt, prompt);
-  await detail.getByText('模型与画面设置', { exact: true }).dblclick();
-  await expect(detail.getByRole('dialog', { name: '时间线详情' })).toBeVisible();
-  await expect(detail.getByRole('dialog')).toHaveCount(1);
-  assert.equal(desktop.windows().length, 2);
-  await detail.keyboard.press('Escape').catch(error => { if (!detail.isClosed()) throw error; });
-  await expect(detail.getByRole('dialog', { name: '片段详情' })).toBeVisible();
+  await expect(detail.getByText('模型与画面设置', { exact: true })).toHaveCount(0);
   const closed = detail.waitForEvent('close');
   await detail.keyboard.press('Escape').catch(error => { if (!detail.isClosed()) throw error; });
   await closed;
   await expect(workspace.getByRole('dialog')).toHaveCount(0);
+  const defaultsWindow = desktop.waitForEvent('window');
+  await workspace.getByTestId('timeline-label').first().click();
+  const defaults = await defaultsWindow;
+  await expect(defaults.getByRole('dialog', { name: '时间线默认配置' })).toBeVisible();
+  await expect(defaults.getByRole('dialog')).toHaveCount(1);
+  assert.equal(desktop.windows().length, 2);
+  const defaultsClosed = defaults.waitForEvent('close');
+  await defaults.keyboard.press('Escape').catch(error => { if (!defaults.isClosed()) throw error; });
+  await defaultsClosed;
   const nextChild = desktop.waitForEvent('window');
   await firstItem.dblclick({ position: { x: 70, y: 24 } });
   const reopened = await nextChild;
@@ -262,14 +309,7 @@ try {
   await expect(workspace.getByRole('menuitem', { name: '新建时间线', exact: true })).toBeVisible();
   await workspace.keyboard.press('Escape');
   await expect(workspace.getByTestId('asset-library')).toHaveCount(0);
-  const fileTransfer = await libraryPage.evaluateHandle(() => {
-    const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='), character => character.charCodeAt(0));
-    const transfer = new DataTransfer();
-    transfer.items.add(new File([bytes], 'desktop-export.png', { type: 'image/png' }));
-    return transfer;
-  });
-  await libraryPage.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: fileTransfer });
-  await fileTransfer.dispose();
+  await nativeFileDrop(libraryPage, libraryPage.getByTestId('asset-library'), diskImage);
   const source = libraryPage.getByTestId('asset-card').filter({ hasText: 'desktop-export.png' });
   await expect(source).toBeVisible();
   const beforePlacement = await snapshot(libraryPage);
@@ -391,14 +431,9 @@ try {
   await expect(ruler).toHaveAttribute('aria-valuenow', '13000');
   assert.deepEqual(await snapshot(workspace), beforeScrub);
   const viewer = workspace.getByTestId('viewer');
-  const transfer = await workspace.evaluateHandle(() => new DataTransfer());
   for (let drag = 0; drag < 2; drag++) {
-    await expect(viewer).toHaveAttribute('draggable', 'true');
-    await viewer.dispatchEvent('dragstart', { dataTransfer: transfer });
-    await workspace.evaluate(() => window.pixelDesktop.isMaximized());
-    assert.equal(await desktop.evaluate(() => globalThis.__pixelNativeDrags.length), drag + 2);
+    await mouseViewerExport(workspace, drag + 2);
   }
-  await transfer.dispose();
   const removedGrant = await workspace.evaluate(assetId => window.pixelDesktop.prepareExport({ assetId }), assetId);
   const deleted = await workspace.evaluate(async itemId => {
     const project = await (await fetch('/api/project')).json();
@@ -416,10 +451,161 @@ try {
   assert.equal(removal.ok, true);
   await workspace.evaluate(async ticket => { window.pixelDesktop.startExport(ticket); await window.pixelDesktop.isMaximized(); }, removedGrant.ticket);
   assert.equal(await desktop.evaluate(() => globalThis.__pixelNativeDrags.length), 3);
-  console.log('PIXEL_DESKTOP_UI_OK: empty production project, nonmodal library, real mouse-started Chromium cross-window asset placement/reference/item reuse, scoped details, window controls, timeline scrubbing, persistence, shared projection, owned-file export and forged/replayed ticket rejection');
+  // Project ingress uses Chromium-backed disk Files, including directories with
+  // Unicode and spaces; JS-created Files cannot grant a filesystem capability.
+  const beforeProjectDrop = await snapshot(workspace);
+  const beforeFile = await readFile(join(storage, 'project.json'), 'utf8');
+  const oldOrigin = new URL(workspace.url()).origin;
+  assert.equal(await workspace.evaluate(async () => (await window.pixelDesktop.openDroppedProject(new File(['{}'], 'project.json'))).ok), false);
+  assert.deepEqual(await snapshot(workspace), beforeProjectDrop);
+  await nativeFileDrop(workspace, viewer, foreignDirectory);
+  await expect(workspace.getByRole('status')).toContainText('项目');
+  assert.deepEqual(await snapshot(workspace), beforeProjectDrop);
+  assert.equal(await readFile(join(foreignDirectory, 'unrelated.txt'), 'utf8'), 'Original unrelated file');
+  assert.equal(await readFile(join(storage, 'project.json'), 'utf8'), beforeFile);
+  const retiringLibrary = await openLibraryWindow(workspace);
+  await nativeFileDrop(retiringLibrary, retiringLibrary.getByTestId('asset-library'), diskImage);
+  await expect(retiringLibrary.getByTestId('asset-card').filter({ hasText: 'desktop-export.png' })).toBeVisible();
+  const retiringSnapshot = await snapshot(workspace);
+  const retiringAsset = Object.values(retiringSnapshot.document.assets).find(asset => asset.metadata.name === 'desktop-export.png');
+  const retiringTicket = await workspace.evaluate(assetId => window.pixelDesktop.prepareExport({assetId}), retiringAsset.id);
+  const retiringDrag = await retiringLibrary.evaluate(({assetId, projectId}) => window.pixelDesktop.beginObjectDrag({role:'asset',payload:{object:{kind:'asset',projectId,id:assetId}}},0), {assetId:retiringAsset.id,projectId:retiringSnapshot.document.id});
+  assert.ok(retiringDrag);
+  const retiringClosed = retiringLibrary.waitForEvent('close');
+  // Inject one native navigation failure to prove activation rollback preserves
+  // the original server, authentication and project instead of returning a
+  // misleading failure after destroying the only working runtime.
+  await desktop.evaluate(({ BrowserWindow }) => {
+    const main = BrowserWindow.getAllWindows().find(window => !new URL(window.webContents.getURL()).searchParams.has('window'));
+    const load = main.loadURL.bind(main);
+    const previous = main.webContents.getURL();
+    main.loadURL = async (url, ...rest) => {
+      if (url !== previous) {
+        main.loadURL = load;
+        globalThis.__pixelRejectedOrigin = new URL(url).origin;
+        throw new Error('Injected candidate navigation failure');
+      }
+      return load(url, ...rest);
+    };
+  });
+  await nativeFileDrop(workspace, viewer, droppedDirectory);
+  await expect.poll(() => desktop.evaluate(() => globalThis.__pixelRejectedOrigin)).not.toBeUndefined();
+  await expect(workspace.getByTestId('timeline-row')).toHaveCount(Object.keys(retiringSnapshot.document.timelines).length);
+  assert.equal(new URL(workspace.url()).origin, oldOrigin);
+  assert.deepEqual(await snapshot(workspace), retiringSnapshot);
+  await retiringClosed;
+  const rejectedOrigin = await desktop.evaluate(() => globalThis.__pixelRejectedOrigin);
+  await expect.poll(async () => { try { await fetch(`${rejectedOrigin}/api/session`); return false; } catch { return true; } }).toBe(true);
+  await nativeFileDrop(workspace, viewer, droppedDirectory);
+  await expect(workspace.getByRole('group', { name: '作品详情', exact: true })).toContainText(basename(droppedDirectory));
+  assert.equal(desktop.windows().length, 1);
+  const fresh = await snapshot(workspace);
+  assert.notEqual(fresh.document.id, retiringSnapshot.document.id);
+  assert.deepEqual(fresh.document.timelines, {});
+  assert.deepEqual(fresh.document.items, {});
+  assert.deepEqual(fresh.document.assets, {});
+  assert.notEqual(new URL(workspace.url()).origin, oldOrigin);
+  assert.equal(await workspace.evaluate(token => window.pixelDesktop.resolveObjectDrag(token), retiringDrag), undefined);
+  await workspace.evaluate(async ticket => { window.pixelDesktop.startExport(ticket); await window.pixelDesktop.isMaximized(); }, retiringTicket.ticket);
+  assert.equal(await desktop.evaluate(() => globalThis.__pixelNativeDrags.length), 3);
+  await expect.poll(async () => { try { await fetch(`${oldOrigin}/api/session`); return false; } catch { return true; } }).toBe(true);
+  const freshFile = JSON.parse(await readFile(join(droppedDirectory, 'project.json'), 'utf8'));
+  assert.equal(freshFile.snapshot.document.id, fresh.document.id);
+  await workspace.getByTestId('timeline-workspace').click({ button:'right', position:{x:260,y:16} });
+  await workspace.getByRole('menuitem', {name:'新建时间线',exact:true}).click();
+  await workspace.getByRole('menuitem', {name:'Grok Imagine Image 2.0',exact:true}).click();
+  await expect(workspace.getByTestId('timeline-row')).toHaveCount(1);
+  const freshTimeline = Object.values((await snapshot(workspace)).document.timelines)[0];
+  const freshLibrary = await openLibraryWindow(workspace);
+  await nativeFileDrop(freshLibrary, freshLibrary.getByTestId('asset-library'), diskImage);
+  const freshSource = freshLibrary.getByTestId('asset-card').filter({hasText:'desktop-export.png'});
+  await expect(freshSource).toBeVisible();
+  await nativeWindowDrop(freshLibrary, freshSource, workspace, workspace.getByTestId('timeline-track'), 0);
+  await expect(workspace.getByTestId('timeline-item')).toHaveCount(1);
+  const editedFresh = await snapshot(workspace);
+  const freshItem = Object.values(editedFresh.document.items)[0];
+  assert.equal(freshItem.timelineId, freshTimeline.id);
+  assert.ok(freshItem.outputAssetId);
+  await expect(viewer.locator('img')).toHaveAttribute('src', `/api/media/${freshItem.outputAssetId}`);
+  await mouseViewerExport(workspace, 4);
+  const freshExport = await desktop.evaluate(() => globalThis.__pixelNativeDrags.at(-1));
+  assert.ok(freshExport.file.startsWith(join(droppedDirectory, 'artifacts')));
+  assert.deepEqual(await readFile(freshExport.file), await readFile(diskImage));
+  const freshClosed = freshLibrary.waitForEvent('close');
+  await nativeFileDrop(workspace, viewer, join(storage, 'project.json'));
+  await expect(workspace.getByTestId('timeline-row')).toHaveCount(Object.keys(retiringSnapshot.document.timelines).length);
+  await freshClosed;
+  assert.deepEqual(await snapshot(workspace), retiringSnapshot);
+  await nativeFileDrop(workspace, viewer, join(droppedDirectory, 'project.json'));
+  await expect(workspace.getByRole('group', {name:'作品详情',exact:true})).toContainText(basename(droppedDirectory));
+  assert.deepEqual(await snapshot(workspace), editedFresh);
+  await expect(viewer.locator('img')).toHaveAttribute('src', `/api/media/${freshItem.outputAssetId}`);
+  await expect(workspace.getByText('输出文件尚未准备好', {exact:true})).toHaveCount(0);
+  await mouseViewerExport(workspace, 5);
+  await desktop.close(); desktop = undefined;
+  desktop = await launch(storage);
+  const remembered = await desktop.firstWindow();
+  await expect(remembered.getByRole('group', {name:'作品详情',exact:true})).toContainText(basename(droppedDirectory));
+  assert.deepEqual(await snapshot(remembered), editedFresh);
+  // A true disk drop directly places ordinary media through the common file
+  // role, without opening a project, presenting a choice or submitting a model.
+  const nativeAudio = join(projectLocations,'本地音频.wav');
+  const nativeVideo = join(projectLocations,'本地视频.mp4');
+  const audioBytes = Buffer.alloc(44+4000);
+  audioBytes.write('RIFF',0);audioBytes.writeUInt32LE(audioBytes.length-8,4);audioBytes.write('WAVEfmt ',8);audioBytes.writeUInt32LE(16,16);
+  audioBytes.writeUInt16LE(1,20);audioBytes.writeUInt16LE(1,22);audioBytes.writeUInt32LE(8000,24);audioBytes.writeUInt32LE(16000,28);
+  audioBytes.writeUInt16LE(2,32);audioBytes.writeUInt16LE(16,34);audioBytes.write('data',36);audioBytes.writeUInt32LE(4000,40);
+  await writeFile(nativeAudio,audioBytes);
+  assert.equal(dirname(resolve(nativeVideo)),resolve(projectLocations));
+  await promisify(execFile)(ffmpeg,['-hide_banner','-nostdin','-f','lavfi','-i','color=c=blue:s=16x16:r=10','-t','0.5','-c:v','libx264','-pix_fmt','yuv420p','-an',nativeVideo],{windowsHide:true,timeout:15000});
+  const timelineWorkspace=remembered.getByTestId('timeline-workspace');
+  let count=Object.keys(editedFresh.document.timelines).length;
+  for(const [file,kind] of [[diskImage,'image'],[nativeAudio,'audio'],[nativeVideo,'video']]){
+    const before=await snapshot(remembered);
+    await nativeFileDrop(remembered,timelineWorkspace,file,{x:260,y:4});
+    await expect(remembered.getByTestId('timeline-row')).toHaveCount(++count);
+    const after=await snapshot(remembered);assert.equal(after.revision,before.revision+1);
+    const createdTrack=Object.values(after.document.timelines).find(track=>!before.document.timelines[track.id]);
+    assert.equal(createdTrack.pluginId,`pixel.${kind}.local`);assert.equal(createdTrack.modelId,undefined);
+    const media=after.document.items[createdTrack.itemIds[0]];const asset=after.document.assets[media.outputAssetId];
+    assert.equal(asset.kind,kind);assert.equal(media.startTick,0);assert.equal(media.outputOrigin,'placement');
+    assert.equal(media.durationTicks,kind==='audio'?250:kind==='video'?500:5000);
+    assert.equal((await remembered.evaluate(async()=> (await(await fetch('/api/jobs')).json()).items)).length,0);
+  }
+  await timelineWorkspace.click({button:'right',position:{x:260,y:4}});
+  await remembered.getByRole('menuitem',{name:'新建时间线',exact:true}).click();
+  await remembered.getByRole('menuitem',{name:'纯文本时间轴',exact:true}).click();
+  await expect(remembered.getByTestId('timeline-row')).toHaveCount(++count);
+  const withText=await snapshot(remembered);const textTrack=Object.values(withText.document.timelines).find(track=>track.pluginId==='pixel.text');
+  const textRow=remembered.locator(`[data-testid="timeline-row"][data-timeline-id="${textTrack.id}"]`);
+  await textRow.scrollIntoViewIfNeeded();
+  await textRow.getByTestId('timeline-track').click({button:'right',position:{x:320,y:18}});
+  if(!(await remembered.getByRole('menuitem',{name:'新建文本片段',exact:true}).count())){
+    await remembered.screenshot({path:join(screenshots,'desktop-text-hit.png')});
+    console.log('PIXEL_TEXT_CONTEXT_DIAGNOSTIC',await remembered.getByRole('menuitem').allTextContents(),await textRow.boundingBox());
+  }
+  await remembered.getByRole('menuitem',{name:'新建文本片段',exact:true}).click();
+  await expect(textRow.getByTestId('timeline-item')).toHaveCount(1);
+  const textDetailOpened=desktop.waitForEvent('window');
+  await textRow.getByTestId('timeline-item').dblclick({position:{x:70,y:24}});
+  const textDetail=await textDetailOpened;
+  await expect(textDetail.getByRole('dialog',{name:'片段详情',exact:true})).toBeVisible();
+  await textDetail.getByLabel('文本描述',{exact:true}).fill('分镜参考：镜头在十秒后进入山谷。');
+  await textDetail.getByLabel('文本描述',{exact:true}).press('Control+Enter');
+  await expect(textRow.getByTestId('timeline-item')).toContainText('分镜参考');
+  const read=await remembered.evaluate(async()=> (await(await fetch('/api/timeline-text')).json()));
+  assert.equal(read.items.length,1);assert.equal(read.items[0].text,'分镜参考：镜头在十秒后进入山谷。');assert.equal(read.items[0].startMs,10000);
+  const textClosed=textDetail.waitForEvent('close');await textDetail.keyboard.press('Escape').catch(error=>{if(!textDetail.isClosed())throw error;});await textClosed;
+  await textRow.getByTestId('timeline-item').click({button:'right',position:{x:70,y:24}});
+  await expect(remembered.getByRole('menuitem',{name:/生成|继续中断/})).toHaveCount(0);await remembered.keyboard.press('Escape');
+  const finalState=await snapshot(remembered);
+  await desktop.close();desktop=undefined;desktop=await launch(storage);
+  const restarted=await desktop.firstWindow();await expect(restarted.getByTestId('timeline-row')).toHaveCount(count);
+  assert.deepEqual(await snapshot(restarted),finalState);
+  console.log('PIXEL_DESKTOP_UI_OK: project ingress/rollback/restart, real PNG WAV MP4 file placement into local tracks with natural durations, editable text reference through shared Actions, read-only text API, unified object relationships, real mouse Viewer file export and revoked credentials');
 } finally {
   if (desktop) await desktop.close();
-  for (const directory of [emptyStorage, storage]) {
+  for (const directory of [emptyStorage, storage, projectLocations]) {
     const checked = resolve(directory);
     assert.equal(dirname(checked), resolve(tmpdir()));
     assert.ok(basename(checked).startsWith('pixel-desktop-'));

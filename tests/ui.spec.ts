@@ -94,10 +94,12 @@ test('素材库是独立非模态工作窗口，空预览与键盘入口不锁�
 });
 
 async function createTimeline(page: Page, title: string): Promise<void> {
+  await page.getByTestId('timeline-workspace').evaluate(element=>{element.scrollTop=0;});
   await page.getByTestId('timeline-workspace').click({ button: 'right', position: { x: 260, y: 16 } });
   await expect(page.getByRole('menuitem')).toHaveCount(1);
   await page.getByRole('menuitem', { name: '新建时间线', exact: true }).click();
-  await expect(page.getByRole('menuitem')).toHaveCount(5);
+  const types=await (await page.request.get('/api/timeline-types?limit=20')).json() as {items:unknown[]};
+  await expect(page.getByRole('menuitem')).toHaveCount(types.items.length);
   await page.getByRole('menuitem', { name: title, exact: true }).click();
   await expect(page.getByRole('menu')).toHaveCount(0);
   await expect(page.getByRole('status')).toContainText('已保存');
@@ -208,6 +210,143 @@ test('单 Modal 路径逐层进入嵌套字段，背景隔离，菜单 Esc 优�
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('#root')).not.toHaveAttribute('inert', '');
+});
+
+test('左侧单击编辑稀疏默认配置，保留原片段，新草稿继承，右键显式刷新并持久化', async ({ page }) => {
+  test.setTimeout(60_000);
+  await openWorkbench(page);
+  const beforeTimeline = await snapshot(page);
+  await createTimeline(page, 'Eleven v4');
+  const timeline = Object.values((await snapshot(page)).document.timelines).find(candidate => !beforeTimeline.document.timelines[candidate.id])!;
+  const row = page.locator(`[data-testid="timeline-row"][data-timeline-id="${timeline.id}"]`);
+  const label = row.getByTestId('timeline-label');
+  const createDraft = async (x: number) => {
+    const existing = (await snapshot(page)).document.timelines[timeline.id]!.itemIds;
+    await row.scrollIntoViewIfNeeded();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await row.getByTestId('timeline-track').click({ button: 'right', position: { x, y: 18 } });
+    await expect(page.getByRole('menu')).toHaveCount(1);
+    await expect(page.getByRole('menuitem', { name: '刷新时间轴默认配置', exact: true })).toHaveCount(0);
+    await page.getByRole('menuitem', { name: '新建生成草稿', exact: true }).click();
+    await expect.poll(async () => (await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(existing.length + 1);
+    return (await snapshot(page)).document.timelines[timeline.id]!.itemIds.find(id => !existing.includes(id))!;
+  };
+  const originalId = await createDraft(320);
+  const originalSnapshot = await snapshot(page);
+  const original = originalSnapshot.document.items[originalId]!;
+  const authored = { ...original.params, text: '这是已有片段，刷新不能改掉正文。', voiceId: 'original-voice', trimTail: false };
+  const updated = await page.request.post('/api/actions', { data: { requestId: crypto.randomUUID(), projectId: originalSnapshot.document.id, expectedRevision: originalSnapshot.revision,
+    type: 'item.params', payload: { itemId: originalId, params: authored } } });
+  expect((await updated.json()).ok).toBe(true);
+  const originalAfterEdit = (await snapshot(page)).document.items[originalId]!;
+  const requests: ActionEnvelope[] = [];
+  page.on('request', request => { if (request.url().endsWith('/api/actions')) requests.push(request.postDataJSON() as ActionEnvelope); });
+
+  await label.click();
+  await expect(page.getByRole('dialog', { name: '时间线默认配置', exact: true })).toHaveCount(1);
+  await expect(page.locator('#root')).toHaveAttribute('inert', '');
+  await expect(page.getByText(/修改只用于新建片段/)).toBeVisible();
+  await expect(page.getByRole('button')).toHaveCount(0);
+  const voice = page.getByLabel('声音 ID', { exact: true });
+  await voice.fill('next-voice'); await voice.press('Enter');
+  await expect.poll(async () => (await snapshot(page)).document.timelines[timeline.id]?.itemDefaults).toEqual({ voiceId: 'next-voice' });
+  await page.getByRole('combobox', { name: '文本上下文', exact: true }).selectOption('manual');
+  await expect(page.getByLabel('前文参考', { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel('后文参考', { exact: true })).toHaveCount(0);
+  const padding = page.getByLabel('尾部余量 / 毫秒', { exact: true });
+  await padding.fill('80'); await padding.press('Enter');
+  await expect(page.getByRole('combobox', { name: '裁剪尾部', exact: true })).toHaveValue('true');
+  await page.getByRole('combobox', { name: '声音设置模式', exact: true }).selectOption('custom');
+  await page.getByRole('group', { name: '进入声音设置', exact: true }).dblclick();
+  await expect(page.getByRole('dialog', { name: '声音设置', exact: true })).toHaveCount(1);
+  await page.getByLabel('稳定度', { exact: true }).fill('0.66');
+  await page.getByLabel('稳定度', { exact: true }).press('Enter');
+  await expect.poll(async () => ((await snapshot(page)).document.timelines[timeline.id]?.itemDefaults?.voiceSettings as { stability: number })?.stability).toBe(0.66);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: '时间线默认配置', exact: true })).toHaveCount(1);
+  await page.screenshot({ path: resolve('.pixel/screenshots/timeline-defaults.png'), fullPage: true });
+  await page.getByRole('dialog').locator('.pixel-modal__content').evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await page.screenshot({ path: resolve('.pixel/screenshots/timeline-defaults-scrolled.png'), fullPage: true });
+  await page.getByRole('dialog').locator('.pixel-modal__content').evaluate(element => { element.scrollTop = 0; });
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.getByTestId('modal-host').locator('.detail-summary').click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: '刷新时间轴默认配置', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect((await snapshot(page)).document.items[originalId]).toEqual(originalAfterEdit);
+  const defaults = (await snapshot(page)).document.timelines[timeline.id]!.itemDefaults!;
+  expect(Object.keys(defaults).sort()).toEqual(['contextMode', 'tailPaddingMs', 'voiceId', 'voiceSettings']);
+  expect(requests.filter(action => action.type === 'timeline.refreshDefaults')).toHaveLength(0);
+
+  const newId = await createDraft(640);
+  const newDraft = (await snapshot(page)).document.items[newId]!;
+  expect(newDraft.params.voiceId).toBe('next-voice'); expect(newDraft.params.contextMode).toBe('manual');
+  expect(newDraft.params.trimTail).toBe(true); expect(newDraft.params.tailPaddingMs).toBe(80);
+  expect(newDraft.params.voiceSettings).toEqual(defaults.voiceSettings); expect(newDraft.params.text).toBe('');
+  expect((await snapshot(page)).document.items[originalId]).toEqual(originalAfterEdit);
+
+  await page.reload();
+  await expect(label).toBeVisible();
+  await label.focus(); await label.press('Enter');
+  await expect(page.getByRole('dialog', { name: '时间线默认配置', exact: true })).toHaveCount(1);
+  await expect(page.getByLabel('声音 ID', { exact: true })).toHaveValue('next-voice');
+  await expect(page.getByRole('combobox', { name: '裁剪尾部', exact: true })).toHaveValue('true');
+  await page.keyboard.press('Escape');
+  await label.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '刷新时间轴默认配置', exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).document.items[originalId]?.params.voiceId).toBe('next-voice');
+  const refreshed = (await snapshot(page)).document.items[originalId]!;
+  expect(refreshed.params.text).toBe(authored.text); expect(refreshed.startTick).toBe(original.startTick);
+  expect(refreshed.durationTicks).toBe(original.durationTicks); expect(refreshed.referenceAssetIds).toEqual(original.referenceAssetIds);
+  expect(refreshed.params.trimTail).toBe(true); expect(refreshed.generationToken).not.toBe(originalAfterEdit.generationToken);
+  expect(requests.filter(action => action.type === 'timeline.refreshDefaults')).toHaveLength(1);
+  expect(await (await page.request.get('/api/jobs')).json()).toEqual({ items: [] });
+
+  await page.locator(`[data-item-id="${newId}"]`).dblclick();
+  await expect(page.getByRole('dialog', { name: '片段详情', exact: true })).toHaveCount(1);
+  await expect(page.getByText('模型与画面设置', { exact: true })).toHaveCount(0);
+  await page.getByLabel('前文参考', { exact: true }).fill('前一段。');
+  await page.getByLabel('前文参考', { exact: true }).press('Control+Enter');
+  await page.getByLabel('后文参考', { exact: true }).fill('后一段。');
+  await page.getByLabel('后文参考', { exact: true }).press('Control+Enter');
+  await expect.poll(async () => (await snapshot(page)).document.items[newId]?.params.previousText).toBe('前一段。');
+  await expect.poll(async () => (await snapshot(page)).document.items[newId]?.params.nextText).toBe('后一段。');
+  await page.keyboard.press('Escape');
+});
+
+test('时间线画面默认设置保留既有片段快照，刷新才应用到旧片段', async ({ page }) => {
+  await openWorkbench(page);
+  const before = await snapshot(page);
+  await createTimeline(page, 'Alibaba: Wan 3.0');
+  const timeline = Object.values((await snapshot(page)).document.timelines).find(candidate => !before.document.timelines[candidate.id])!;
+  const row = page.locator(`[data-testid="timeline-row"][data-timeline-id="${timeline.id}"]`);
+  await row.scrollIntoViewIfNeeded();
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await row.getByTestId('timeline-track').click({ button: 'right', position: { x: 320, y: 18 } });
+  await page.getByRole('menuitem', { name: '新建生成草稿', exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(1);
+  const itemId = (await snapshot(page)).document.timelines[timeline.id]!.itemIds[0]!;
+  const original = (await snapshot(page)).document.items[itemId]!;
+  await row.getByTestId('timeline-label').click();
+  await expect(page.getByRole('dialog', { name: '时间线默认配置', exact: true })).toHaveCount(1);
+  await page.getByRole('combobox', { name: '分辨率', exact: true }).selectOption('1080p');
+  await expect.poll(async () => (await snapshot(page)).document.timelines[timeline.id]?.settings.resolution).toBe('1080p');
+  const retained = (await snapshot(page)).document.items[itemId]!;
+  expect(retained.generationSettings?.resolution).toBe('720p');
+  expect(retained.generationToken).toBe(original.generationToken);
+  expect(retained.params).toEqual(original.params); expect(retained.outputAssetId).toBe(original.outputAssetId);
+  await page.keyboard.press('Escape');
+  await row.getByTestId('timeline-track').click({ button: 'right', position: { x: 640, y: 18 } });
+  await page.getByRole('menuitem', { name: '新建生成草稿', exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(2);
+  const newItemId = (await snapshot(page)).document.timelines[timeline.id]!.itemIds.find(id => id !== itemId)!;
+  expect((await snapshot(page)).document.items[newItemId]?.generationSettings?.resolution).toBe('1080p');
+  await row.getByTestId('timeline-label').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '刷新时间轴默认配置', exact: true }).click();
+  await expect.poll(async () => (await snapshot(page)).document.items[itemId]?.generationSettings?.resolution).toBe('1080p');
+  expect((await snapshot(page)).document.items[itemId]?.generationToken).not.toBe(original.generationToken);
+  expect(await (await page.request.get('/api/jobs')).json()).toEqual({ items: [] });
 });
 
 test('片段本体拖动位置，边缘独立调整区间，模型参数保持原语义', async ({ page }) => {
@@ -450,4 +589,191 @@ test('720px 工作台保持可读且时间线在容器内滚动', async ({ page 
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.screenshot({ path: resolve('.pixel/screenshots/frontend-720.png'), fullPage: true });
+});
+
+test('系统文件拖入主窗口走项目入口，浏览器开发版阻止误导入与页面跳转', async ({ page }) => {
+  await openWorkbench(page);
+  const before = await snapshot(page);
+  let imports = 0;
+  await page.route('**/api/import', async route => { imports++; await route.abort(); });
+  const transfer = await page.evaluateHandle(() => {
+    const data = new DataTransfer();
+    data.items.add(new File([''], '测试', { type: 'application/octet-stream' }));
+    return data;
+  });
+  // Nested timeline handlers cannot reinterpret an OS file drop as item placement.
+  await page.getByTestId('timeline-track').first().dispatchEvent('dragover', { dataTransfer: transfer });
+  await page.getByTestId('timeline-track').first().dispatchEvent('drop', { dataTransfer: transfer });
+  await expect(page.getByRole('status')).toContainText('请使用桌面版拖入项目文件或文件夹');
+  expect(page.url()).toBe('http://127.0.0.1:4320/');
+  expect(imports).toBe(0);
+  expect(await snapshot(page)).toEqual(before);
+  await transfer.dispose();
+});
+
+test('系统目录拖入素材库明确拒绝，不上传空目录或打开项目', async ({ page }) => {
+  await openWorkbench(page);
+  const before = await snapshot(page);
+  const library = await openLibrary(page);
+  let imports = 0;
+  await library.route('**/api/import', async route => { imports++; await route.abort(); });
+  const transfer = await library.evaluateHandle(() => {
+    const data = new DataTransfer();
+    data.items.add(new File([''], '测试', { type: 'application/octet-stream' }));
+    // Chromium returns fresh DataTransferItem wrappers when reading the list.
+    Object.defineProperty(DataTransferItem.prototype, 'webkitGetAsEntry', { configurable: true, value: () => ({ isDirectory: true }) });
+    return data;
+  });
+  await library.getByTestId('asset-library').dispatchEvent('drop', { dataTransfer: transfer });
+  await expect(library.getByRole('status')).toContainText('项目文件夹请拖入主窗口');
+  expect(imports).toBe(0);
+  expect(await snapshot(page)).toEqual(before);
+  await transfer.dispose();
+  await library.close();
+});
+
+test('打开非默认 ID 的项目后，窗口投影、详情和命令使用宿主项目身份', async ({ page }) => {
+  const state = await snapshot(page);
+  const projectId = 'opened-project-测试';
+  const opened = structuredClone(state);
+  opened.document.id = projectId;
+  opened.document.title = '拖入的项目';
+  await page.route('**/api/session', route => route.fulfill({ json: { projectId, sessionId: 'opened-project-session' } }));
+  await page.route('**/api/project', route => route.fulfill({ json: opened }));
+  let lastAction: ActionEnvelope | undefined;
+  await page.route('**/api/actions', async route => {
+    lastAction = route.request().postDataJSON() as ActionEnvelope;
+    await route.fulfill({ json: { ok: false, requestId: lastAction.requestId, error: { code: 'NOT_APPLICABLE', message: '当前项目命令已捕获' } } });
+  });
+  await page.goto('/');
+  await expect(page.getByRole('group', { name: '作品详情', exact: true })).toHaveText('拖入的项目');
+  await page.getByRole('group', { name: '作品详情', exact: true }).dblclick();
+  await expect(page.getByRole('dialog', { name: '作品详情', exact: true })).toBeVisible();
+  await page.getByRole('textbox', { name: '作品名称', exact: true }).fill('新名称');
+  await page.getByRole('textbox', { name: '作品名称', exact: true }).press('Enter');
+  await expect.poll(() => lastAction?.projectId).toBe(projectId);
+  expect(lastAction?.type).toBe('project.title');
+  expect(lastAction?.payload).toEqual({ title: '新名称' });
+});
+
+async function pictureTransfer(page:Page):Promise<Awaited<ReturnType<Page['evaluateHandle']>>> {
+  return page.evaluateHandle(()=>{
+    const png=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='),c=>c.charCodeAt(0));
+    const data=new DataTransfer();data.items.add(new File([png],'direct-picture.png',{type:'image/png'}));return data;
+  });
+}
+
+test('外部图片直接拖入时间线原子创建普通媒体轨，模型轨与 Viewer 不偷偷导入', async ({page})=>{
+  await openWorkbench(page);
+  let imports=0;let placements=0;
+  await page.route('**/api/import',async route=>{imports++;await route.continue();});
+  await page.route('**/api/media-place',async route=>{placements++;await route.continue();});
+  const before=await snapshot(page);
+  const data=await pictureTransfer(page);
+  await page.getByTestId('timeline-workspace').dispatchEvent('drop',{dataTransfer:data});
+  await expect(page.getByRole('status')).toContainText('已放置 direct-picture.png');
+  const placed=await snapshot(page);
+  expect(placed.revision).toBe(before.revision+1);
+  const timeline=Object.values(placed.document.timelines).find(candidate=>!before.document.timelines[candidate.id])!;
+  expect(timeline.pluginId).toBe('pixel.image.local');
+  expect(timeline.modelId).toBeUndefined();
+  const item=placed.document.items[timeline.itemIds[0]!]!;
+  expect(item.startTick).toBe(0);
+  expect(item.outputAssetId).toBeTruthy();
+  expect(Object.keys(placed.document.assets)).toHaveLength(Object.keys(before.document.assets).length+1);
+  const view=page.locator(`[data-item-id="${item.id}"]`);
+  await view.click();
+  await expect(page.getByTestId('viewer').locator('img')).toHaveAttribute('src',`/api/media/${item.outputAssetId}`);
+  await view.click({button:'right'});
+  await expect(page.getByRole('menuitem',{name:'生成片段',exact:true})).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await view.dblclick();
+  await expect(page.getByRole('dialog')).toContainText('输出媒体');
+  await expect(page.getByRole('dialog')).not.toContainText('生成输出');
+  await page.keyboard.press('Escape');
+  const track=page.locator(`[data-timeline-id="${timeline.id}"]`).getByTestId('timeline-track');
+  await track.scrollIntoViewIfNeeded();
+  const box=await track.boundingBox();
+  await track.dispatchEvent('drop',{dataTransfer:data,clientX:box!.x+320,clientY:box!.y+18});
+  await expect.poll(async()=>(await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(2);
+  const second=await snapshot(page);
+  expect(second.document.items[second.document.timelines[timeline.id]!.itemIds[1]!]!.startTick).toBe(10000);
+  const generated=Object.values(second.document.timelines).find(candidate=>candidate.modelId==='x-ai/grok-imagine-image-2.0')!;
+  await page.locator(`[data-timeline-id="${generated.id}"]`).getByTestId('timeline-track').dispatchEvent('drop',{dataTransfer:data});
+  await expect(page.getByRole('status')).toContainText('请将媒体拖入普通媒体时间线');
+  await page.getByTestId('viewer').dispatchEvent('drop',{dataTransfer:data});
+  await expect(page.getByRole('status')).toContainText('请将媒体拖入普通媒体时间线');
+  expect(await snapshot(page)).toEqual(second);
+  expect(imports).toBe(0);expect(placements).toBe(2);
+  expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
+  await data.dispose();
+});
+
+test('纯文本参考经时间线基类创建编辑移动缩放复制删除，选中不会遮蔽媒体预览', async ({page})=>{
+  await openWorkbench(page);
+  const picture=await pictureTransfer(page);
+  await page.getByTestId('timeline-workspace').dispatchEvent('drop',{dataTransfer:picture});
+  await expect(page.getByRole('status')).toContainText('已放置 direct-picture.png');await picture.dispose();
+  const before=await snapshot(page);
+  await createTimeline(page,'纯文本时间轴');
+  const created=await snapshot(page);
+  const timeline=Object.values(created.document.timelines).find(candidate=>!before.document.timelines[candidate.id])!;
+  expect(timeline.pluginId).toBe('pixel.text');expect(timeline.modelId).toBeUndefined();
+  expect(timeline.itemIds).toEqual([]);
+  const row=page.locator(`[data-timeline-id="${timeline.id}"]`);
+  await row.getByTestId('timeline-label').click({button:'right'});
+  await expect(page.getByRole('menuitem',{name:'刷新时间轴默认配置',exact:true})).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await row.getByTestId('timeline-track').click({button:'right',position:{x:4,y:18}});
+  await expect(page.getByRole('menuitem',{name:'新建生成草稿',exact:true})).toHaveCount(0);
+  await page.getByRole('menuitem',{name:'新建文本片段',exact:true}).click();
+  await expect.poll(async()=>(await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(1);
+  const initial=await snapshot(page);
+  const id=initial.document.timelines[timeline.id]!.itemIds[0]!;
+  const note=page.locator(`[data-item-id="${id}"]`);
+  await note.dblclick();
+  const body='镜头 1：进入车站\n提示词参考：夜色、雨滴与窗内灯光';
+  const field=page.getByRole('textbox',{name:'文本描述',exact:true});
+  await field.fill(body);await field.press('Control+Enter');
+  await expect.poll(async()=>(await snapshot(page)).document.items[id]?.params.text).toBe(body);
+  expect(await field.evaluate(element=>getComputedStyle(element).fontSize)).toBe('12px');
+  await expect(page.getByTestId('item-reference')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await note.click();
+  // A reference track never becomes a synthetic Viewer output or hides media.
+  await expect(page.getByTestId('viewer').locator('img,video,audio')).toHaveCount(1);
+  await expect(note).toContainText('镜头 1：进入车站');
+  await note.click({button:'right'});
+  await expect(page.getByRole('menuitem',{name:'生成片段',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('menuitem',{name:'继续中断任务',exact:true})).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  const disk=await pictureTransfer(page);
+  await row.getByTestId('timeline-track').dispatchEvent('drop',{dataTransfer:disk});
+  await expect(page.getByRole('status')).toContainText('请将媒体拖入普通媒体时间线');
+  expect((await snapshot(page)).revision).toBe(initial.revision+1);
+  await disk.dispose();
+  const transfer=await page.evaluateHandle(()=>new DataTransfer());
+  const box=await note.boundingBox();
+  await note.dispatchEvent('dragstart',{dataTransfer:transfer,clientX:box!.x+16,clientY:box!.y+24});
+  const track=row.getByTestId('timeline-track');const trackBox=await track.boundingBox();
+  await track.dispatchEvent('drop',{dataTransfer:transfer,clientX:trackBox!.x+640,clientY:trackBox!.y+24});
+  await note.dispatchEvent('dragend',{dataTransfer:transfer});await transfer.dispose();
+  await expect.poll(async()=>(await snapshot(page)).document.items[id]?.startTick).toBe(19500);
+  await note.scrollIntoViewIfNeeded();
+  const edge=await note.getByTestId('item-edge-end').boundingBox();
+  await page.mouse.move(edge!.x+edge!.width/2,edge!.y+edge!.height/2);await page.mouse.down();
+  await page.mouse.move(edge!.x+edge!.width/2+32,edge!.y+edge!.height/2,{steps:4});await page.mouse.up();
+  await expect.poll(async()=>(await snapshot(page)).document.items[id]?.durationTicks).toBe(6000);
+  await note.click({button:'right'});await page.getByRole('menuitem',{name:'复制片段',exact:true}).click();
+  await expect.poll(async()=>(await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(2);
+  const copied=await snapshot(page);const copyId=copied.document.timelines[timeline.id]!.itemIds.find(itemId=>itemId!==id)!;
+  expect(copied.document.items[copyId]?.params.text).toBe(body);
+  await page.locator(`[data-item-id="${copyId}"]`).click({button:'right'});await page.getByRole('menuitem',{name:'删除片段',exact:true}).click();
+  await expect.poll(async()=>(await snapshot(page)).document.timelines[timeline.id]?.itemIds.length).toBe(1);
+  const final=await snapshot(page);
+  expect(final.document.items[id]?.kind).toBe('text.note');
+  expect(final.document.items[id]?.outputAssetId).toBeUndefined();expect(final.document.items[id]?.referenceAssetIds).toEqual([]);
+  expect(Object.keys(final.document.assets)).toHaveLength(Object.keys(before.document.assets).length);
+  expect(await(await page.request.get('/api/jobs')).json()).toEqual({items:[]});
+  await page.reload();await expect(page.locator(`[data-item-id="${id}"]`)).toContainText('镜头 1：进入车站');
 });

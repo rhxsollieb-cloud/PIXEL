@@ -71,6 +71,31 @@ export interface MediaReader {
   read(asset: DeepReadonly<AssetData>, signal: AbortSignal): Promise<{ bytes: Uint8Array; mimeType: string }>;
 }
 
+/** 已解析的正文边界；供应商时间戳适配与真实音频编解码是两个可替换边界。 */
+export interface AudioTailProcessingRequest {
+  bytes: Uint8Array;
+  mimeType: string;
+  speechEndSeconds: number;
+  /** 若时间戳含额外发音，padding 不得延伸到它的起点。 */
+  nextSpeechStartSeconds?: number;
+  paddingMs: number;
+  fadeMs: number;
+  outputFormat: string;
+}
+
+export interface AudioTailProcessingResult {
+  bytes: Uint8Array;
+  mimeType: string;
+  extension: string;
+  sourceDurationSeconds: number;
+  durationSeconds: number;
+}
+
+/** 在同一任务 signal 下解码、裁切和重编码；不能裁切压缩音频的裸字节。 */
+export interface AudioPostProcessor {
+  trimTail(request: AudioTailProcessingRequest, signal: AbortSignal): Promise<AudioTailProcessingResult>;
+}
+
 export type ProviderErrorCode =
   | 'INVALID_INPUT' | 'UNSUPPORTED_MODEL' | 'UNSUPPORTED_REFERENCE' | 'UNSUPPORTED_RESUME'
   | 'AUTHENTICATION' | 'RATE_LIMITED' | 'UPSTREAM' | 'REMOTE_FAILED' | 'TIMEOUT' | 'CANCELED' | 'INVALID_OUTPUT';

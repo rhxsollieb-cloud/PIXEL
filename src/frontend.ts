@@ -1,7 +1,7 @@
 import { actionEnvelopeSchema } from './contracts.js';
 import type {
   ActionAvailability, ActionEnvelope, ActionResult, ContextAction, DeepReadonly,
-  JsonObject, ObjectRef, ProjectChanged, ProjectSnapshot, Unsubscribe,
+  JsonObject, MediaKind, ObjectRef, ProjectChanged, ProjectSnapshot, Unsubscribe,
 } from './contracts.js';
 
 /** preload 只暴露这三个能力；renderer 不接触数据库、文件系统或权限声明。 */
@@ -273,6 +273,8 @@ export interface DragPayloadMap {
   item: { object: ItemRef };
   'item.duration': { object: ItemRef; edge: 'start' | 'end' };
   'field.reference': { object: ObjectRef; fieldKey: string };
+  /** File 适配器的类型提示；真实字节由后端验证，不传 File、路径或对象授权。 */
+  'external.media': { object: { kind: 'project'; projectId: string }; kind: MediaKind };
 }
 export type DragSourceRole = keyof DragPayloadMap;
 export type DragSource<R extends DragSourceRole = DragSourceRole> = {
@@ -305,7 +307,7 @@ export interface InteractionRegistryOptions {
   navigator?: ModalNavigator;
 }
 
-const sourceRoles: ReadonlySet<string> = new Set(['asset', 'item', 'item.duration', 'field.reference']);
+const sourceRoles: ReadonlySet<string> = new Set(['asset', 'item', 'item.duration', 'field.reference', 'external.media']);
 const targetRoles: ReadonlySet<string> = new Set(['timeline.position', 'asset-library', 'item.edge', 'item.reference', 'field.reference']);
 type ErasedDragRoute = DragRoute<DragSourceRole, DragTargetRole>;
 
@@ -327,12 +329,13 @@ function sourceMatchesRole(source: DeepReadonly<DragSource>): boolean {
     case 'item.duration':
       return source.payload.object.kind === 'item' && (source.payload.edge === 'start' || source.payload.edge === 'end');
     case 'field.reference': return typeof source.payload.fieldKey === 'string' && source.payload.fieldKey.trim().length > 0;
+    case 'external.media': return source.payload.object.kind === 'project' && ['video', 'audio', 'image'].includes(source.payload.kind);
   }
 }
 
 function targetMatchesRole(target: DeepReadonly<DragTarget>): boolean {
   switch (target.role) {
-    case 'timeline.position': return target.object.kind === 'timeline';
+    case 'timeline.position': return target.object.kind === 'timeline' || target.object.kind === 'project';
     case 'asset-library': return target.object.kind === 'project';
     case 'item.edge':
     case 'item.reference': return target.object.kind === 'item';
@@ -401,21 +404,24 @@ export class DragRegistry {
   private key(source: DragSourceRole, target: DragTargetRole): string { return `${source}->${target}`; }
 }
 
-/** Electron main 的后续适配契约；token 经 DataTransfer 传递，不能序列化函数或对象实例。 */
-export interface NativeDragToken {
-  sessionId: string;
-  projectId: string;
-  expiresAtMs: number;
+/** 窗口宿主解析后的对象会话；DataTransfer 只携带 sessionId，不携带对象授权。 */
+export interface ObjectDragSession {
+  readonly sessionId: string;
+  readonly source: DeepReadonly<DragSource>;
+  readonly offsetTicks: number;
 }
-export interface NativeDragBroker {
-  /** 实现必须从可信 IPC sender 绑定来源窗口，校验类型、对象归属与 TTL。 */
-  begin(source: DeepReadonly<DragSource>): Promise<DeepReadonly<NativeDragToken>>;
-  /** 接收窗口身份同样由 IPC sender 提供；不同项目需要单独的导入/复制动作。 */
-  resolve(sessionId: string): Promise<DeepReadonly<DragSource> | undefined>;
-  /** drop 时原子解析并消费 token；resolve 仅用于 hover，不能授权实际提交。 */
-  consume(sessionId: string): Promise<DeepReadonly<DragSource> | undefined>;
-  /** drop 或取消后消费会话；来源窗口关闭/过期也应清理，防止 token 被重复使用。 */
-  end(sessionId: string, outcome: 'dropped' | 'canceled'): Promise<void>;
+
+/** Electron 与同源浏览器窗口共用的同步手势契约，不处理系统 File 或原生文件导出。 */
+export interface ObjectDragTransport {
+  /** 来源窗口由适配器绑定；同步返回 token 以供 dragstart 写入 DataTransfer，拒绝 external.media。 */
+  beginObjectDrag(source: DeepReadonly<DragSource>, offsetTicks: number): string | undefined;
+  onObjectDrag(listener: (drag: ObjectDragSession | undefined) => void): Unsubscribe;
+  /** hover 只解析，不能消费；适配器再次校验来源、项目、对象和有效期。 */
+  resolveObjectDrag(sessionId: string): ObjectDragSession | undefined;
+  /** 合法 drop 原子解析且单次消费；接收窗口身份由适配器绑定。 */
+  finishObjectDrag(sessionId: string): ObjectDragSession | undefined;
+  /** 只有来源可以结束；真实 dragend 留有限宽限，主动取消立即撤销。 */
+  endObjectDrag(sessionId: string, canceled?: boolean): void;
 }
 
 export interface ContextActionContext {

@@ -26,11 +26,14 @@ export interface TimelineData {
   id: string;
   pluginId: string;
   pluginVersion: number;
-  modelId: string;
+  /** 仅生成时间线声明模型；本地语义插件（如纯文本）不伪造模型 ID。 */
+  modelId?: string;
   /** 每秒整数 tick 数；区间统一为 [startTick, startTick + durationTicks)。 */
   ticksPerSecond: number;
   itemIds: string[];
   settings: JsonObject;
+  /** 新片段的稀疏参数默认配置；旧项目缺省为 {}，修改不重写已有片段。 */
+  itemDefaults?: JsonObject;
 }
 
 /** 通用时间壳 + 插件专属 params，不要求音乐、对话等都继承 VideoClip。 */
@@ -42,8 +45,12 @@ export interface TimelineItemData {
   durationTicks: number;
   sourceOffsetTicks: number;
   params: JsonObject;
+  /** 时间线设置在创建/显式刷新时捕获；旧片段缺省时由宿主惰性兼容。 */
+  generationSettings?: JsonObject;
   referenceAssetIds: string[];
   outputAssetId?: string;
+  /** 放置已有素材与由当前生成输入得到的输出具有不同的失效语义。 */
+  outputOrigin?: 'placement' | 'generated';
   /** 每次影响生成输入的编辑或重新生成都换 token，撤销也不能复用旧 token。 */
   generationToken: string;
 }
@@ -165,6 +172,8 @@ export interface GenerationRequest {
   settings?: JsonObject;
   /** 明确的生成时长约束；自然时长语音与静态图像不接受伪时长。 */
   durationMs?: number;
+  /** 提交时捕获的语音上下文；供应商仅将其用作参考，不拼入正文。 */
+  context?: { previousText?: string; nextText?: string };
   references: GenerationReference[];
 }
 
@@ -184,6 +193,10 @@ export const generationRequestSchema = z.strictObject({
   params: jsonObjectSchema,
   settings: jsonObjectSchema.optional(),
   durationMs: z.number().int().positive().safe().optional(),
+  context: z.strictObject({
+    previousText: z.string().max(10_000).optional(),
+    nextText: z.string().max(10_000).optional(),
+  }).optional(),
   references: z.array(z.strictObject({
     id: z.string().min(1).max(200),
     kind: z.enum(['image', 'audio', 'video']),

@@ -1,27 +1,18 @@
 import type { DeepReadonly, ProjectSnapshot, Unsubscribe } from '../src/contracts.js';
-import type { DragSource } from '../src/frontend.js';
+import type { DragSource, ObjectDragSession, ObjectDragTransport } from '../src/frontend.js';
 
-export interface BrowserObjectDrag {
-  readonly sessionId: string;
-  readonly source: DeepReadonly<DragSource>;
-  readonly offsetTicks: number;
-}
+export type BrowserObjectDrag = ObjectDragSession;
 
 export interface BrowserWindowReaders {
   snapshot(): DeepReadonly<ProjectSnapshot> | undefined;
   interactive(): boolean;
 }
 
-export interface BrowserWindowHost {
+export interface BrowserWindowHost extends ObjectDragTransport {
   readonly isLibraryWindow: boolean;
   readonly isDetailWindow: false;
   openLibrary(): Promise<void>;
   close(): void;
-  onObjectDrag(listener: (drag: BrowserObjectDrag | undefined) => void): Unsubscribe;
-  beginObjectDrag(source: DeepReadonly<DragSource>, offsetTicks: number): string | undefined;
-  resolveObjectDrag(token: string): BrowserObjectDrag | undefined;
-  finishObjectDrag(token: string): BrowserObjectDrag | undefined;
-  endObjectDrag(token: string): void;
 }
 
 interface Client {
@@ -168,6 +159,7 @@ export function browserWindowHost(readers?: BrowserWindowReaders): BrowserWindow
       return () => { listeners.delete(listener); };
     },
     beginObjectDrag(source, offsetTicks) {
+      if (source.role === 'external.media') return undefined;
       const broker = connect();
       if (!live(client, broker.origin, true) || !sourceExists(source, client) || !Number.isSafeInteger(offsetTicks) || offsetTicks < 0) return undefined;
       if (source.role !== 'asset' && source.role !== 'item') return undefined;
@@ -187,10 +179,12 @@ export function browserWindowHost(readers?: BrowserWindowReaders): BrowserWindow
       if (drag) connect().clear();
       return drag;
     },
-    endObjectDrag(token) {
+    endObjectDrag(token, canceled = false) {
       const broker = connect();
       const session = broker.session;
-      if (!session || session.drag.sessionId !== token || session.sourceClient !== clientId || session.cancellation !== undefined) return;
+      if (!session || session.drag.sessionId !== token || session.sourceClient !== clientId) return;
+      if (canceled === true) { broker.clear(); return; }
+      if (session.cancellation !== undefined) return;
       // Chromium may emit source dragend just before the receiving window handles drop.
       const timer = window.setTimeout(() => { if (broker.session === session) broker.clear(); }, END_GRACE_MS);
       session.cancellation = () => window.clearTimeout(timer);

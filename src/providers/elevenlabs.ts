@@ -7,6 +7,7 @@ import {
   createSdkFetch,
   streamBytes,
   type GenerationOutput,
+  type AudioPostProcessor,
   type ModelProviderManifest,
   type ProviderRunContext,
 } from '../generation.js';
@@ -16,6 +17,7 @@ import {
   soundEffectGenerationParamsSchema,
   speechGenerationParamsSchema,
 } from '../models.js';
+import { FfmpegAudioPostProcessor } from '../audio-processing.js';
 
 export interface ElevenLabsProviderOptions {
   /** 仅由后端配置注入；不得保存进项目或 provider manifest。 */
@@ -23,6 +25,82 @@ export interface ElevenLabsProviderOptions {
   /** 自定义 client 的 fetch 生命周期与日志设置由注入方负责。 */
   client?: ElevenLabsClient;
   timeoutMs?: number;
+  /** 可替换的宿主音频编解码器；所有后处理仍继承当前任务的 signal。 */
+  audioProcessor?: AudioPostProcessor;
+}
+
+/** 原始字符对齐严格对应本次正文；额外后文的起点用于限制 padding。 */
+export function speechTailBoundary(text: string, alignment: ElevenLabs.CharacterAlignmentResponseModel | undefined): {
+  speechEndSeconds: number; nextSpeechStartSeconds?: number;
+} {
+  if (!alignment || alignment.characters.length === 0 || alignment.characters.length > 50_000
+    || alignment.characters.length !== alignment.characterStartTimesSeconds.length
+    || alignment.characters.length !== alignment.characterEndTimesSeconds.length) {
+    throw new ProviderError('INVALID_OUTPUT', '缺少可靠的正文时间戳，无法自动处理尾音');
+  }
+  let previousStart = 0;
+  let previousEnd = 0;
+  const characterIndexes: number[] = [];
+  alignment.characters.forEach((character, index) => {
+    const start = alignment.characterStartTimesSeconds[index]!;
+    const end = alignment.characterEndTimesSeconds[index]!;
+    if (typeof character !== 'string' || character.length === 0 || character.length > 20
+      || !Number.isFinite(start) || !Number.isFinite(end) || start < previousStart || end < previousEnd || end < start) {
+      throw new ProviderError('INVALID_OUTPUT', '正文时间戳格式或顺序无效');
+    }
+    previousStart = start;
+    previousEnd = end;
+    for (let unit = 0; unit < character.length; unit++) characterIndexes.push(index);
+  });
+  const joined = alignment.characters.join('');
+  // v4 音频标签控制表演而不属于发音；兼容供应商保留或省略标签的字符对齐。
+  const tagPattern = /\[[^\]\r\n]{1,100}\]/g;
+  const excluded = new Set<number>();
+  for (const match of joined.matchAll(tagPattern)) {
+    for (let unit = match.index; unit < match.index + match[0].length; unit++) excluded.add(unit);
+  }
+  let plain = '';
+  const plainIndexes: number[] = [];
+  for (let unit = 0; unit < joined.length; unit++) {
+    if (!excluded.has(unit)) { plain += joined[unit]; plainIndexes.push(characterIndexes[unit]!); }
+  }
+  const leading = plain.length - plain.trimStart().length;
+  plain = plain.slice(leading);
+  plainIndexes.splice(0, leading);
+  const expected = text.replace(tagPattern, '').trim();
+  if (!expected || !plain.startsWith(expected)) throw new ProviderError('INVALID_OUTPUT', '时间戳文本与当前正文不匹配，无法自动处理尾音');
+  let speechEndSeconds = 0;
+  let unit = 0;
+  for (const character of expected) {
+    if (/[\p{L}\p{N}]/u.test(character)) {
+      speechEndSeconds = Math.max(speechEndSeconds, alignment.characterEndTimesSeconds[plainIndexes[unit]!]!);
+    }
+    unit += character.length;
+  }
+  if (!(speechEndSeconds > 0)) throw new ProviderError('INVALID_OUTPUT', '没有可识别的正文发音边界，无法自动处理尾音');
+  let nextSpeechStartSeconds: number | undefined;
+  unit = expected.length;
+  for (const character of plain.slice(expected.length)) {
+    if (/[\p{L}\p{N}]/u.test(character)) {
+      nextSpeechStartSeconds = alignment.characterStartTimesSeconds[plainIndexes[unit]!]!;
+      break;
+    }
+    unit += character.length;
+  }
+  if (nextSpeechStartSeconds !== undefined && nextSpeechStartSeconds < speechEndSeconds) {
+    throw new ProviderError('INVALID_OUTPUT', '正文与额外发音的时间戳发生重叠');
+  }
+  return { speechEndSeconds, ...(nextSpeechStartSeconds === undefined ? {} : { nextSpeechStartSeconds }) };
+}
+
+function decodeTimestampAudio(value: string): Uint8Array {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 180 * 1024 * 1024
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new ProviderError('INVALID_OUTPUT', '供应商返回了无效的音频编码');
+  }
+  const bytes = Buffer.from(value, 'base64');
+  if (!bytes.length || bytes.length > 128 * 1024 * 1024) throw new ProviderError('INVALID_OUTPUT', '供应商返回的音频为空或过大');
+  return bytes;
 }
 
 /** SDK 只负责供应商协议；校验、取消、产物归属由核心执行模板与宿主负责。 */
@@ -37,6 +115,7 @@ export class ElevenLabsModelProvider extends BaseModelProvider {
 
   private readonly client: ElevenLabsClient;
   private readonly requestTimeoutSeconds: number;
+  private readonly audioProcessor: AudioPostProcessor | undefined;
 
   constructor(options: ElevenLabsProviderOptions) {
     const timeoutMs = options.timeoutMs ?? 600_000;
@@ -51,6 +130,7 @@ export class ElevenLabsModelProvider extends BaseModelProvider {
       logging: { silent: true },
     });
     this.requestTimeoutSeconds = timeoutMs / 1_000;
+    this.audioProcessor = options.audioProcessor;
   }
 
   protected async performGeneration(
@@ -72,15 +152,55 @@ export class ElevenLabsModelProvider extends BaseModelProvider {
     if (request.modelId === 'eleven_v4') {
       const params = speechGenerationParamsSchema.parse(request.params);
       outputFormat = params.outputFormat;
-      const body: ElevenLabs.BodyTextToSpeechFull = {
-        text: params.text,
+      const body: ElevenLabs.BodyTextToDialogueFullWithTimestamps = {
+        inputs: [{ text: params.text, voiceId: params.voiceId }],
         modelId: 'eleven_v4',
         outputFormat: params.outputFormat,
       };
       if (params.languageCode != null) body.languageCode = params.languageCode;
       if (params.seed != null) body.seed = params.seed;
-      if (params.voiceSettings != null) body.voiceSettings = params.voiceSettings;
-      const result = await this.client.textToSpeech.convert(params.voiceId, body, requestOptions).withRawResponse();
+      if (params.voiceSettings != null) body.settings = {
+        stability: params.voiceSettings.stability, similarity: params.voiceSettings.similarityBoost,
+      };
+      const textContext = params.contextMode === 'manual'
+        ? { previousText: params.previousText, nextText: params.nextText }
+        : params.contextMode === 'neighbors' ? request.context : undefined;
+      if (textContext?.previousText) body.previousText = textContext.previousText;
+      if (textContext?.nextText) body.futureText = textContext.nextText;
+      if (params.trimTail) {
+        const result = await this.client.textToDialogue.convertWithTimestamps(body, requestOptions).withRawResponse();
+        context.signal.throwIfAborted();
+        const boundary = speechTailBoundary(params.text, result.data.alignment ?? result.data.normalizedAlignment);
+        const bytes = decodeTimestampAudio(result.data.audioBase64);
+        context.reportProgress({ attemptToken: context.attemptToken, fraction: 0.5, stage: 'processing-tail' });
+        const processed = await (this.audioProcessor ?? new FfmpegAudioPostProcessor()).trimTail({
+          bytes, mimeType: 'audio/mpeg', outputFormat, ...boundary,
+          paddingMs: params.tailPaddingMs, fadeMs: params.tailFadeMs,
+        }, context.signal);
+        context.signal.throwIfAborted();
+        if (processed.mimeType !== 'audio/mpeg' || processed.extension !== 'mp3'
+          || !Number.isFinite(processed.durationSeconds) || processed.durationSeconds <= 0
+          || processed.durationSeconds + 0.001 < boundary.speechEndSeconds
+          || processed.durationSeconds > Math.min(boundary.speechEndSeconds + params.tailPaddingMs / 1_000,
+            boundary.nextSpeechStartSeconds ?? Infinity) + 0.001
+          || !Number.isFinite(processed.sourceDurationSeconds) || processed.sourceDurationSeconds < processed.durationSeconds
+          || !(processed.bytes instanceof Uint8Array) || !processed.bytes.length) {
+          throw new ProviderError('INVALID_OUTPUT', '音频处理器返回了无效的正文产物');
+        }
+        const artifact = await context.artifacts.write({
+          attemptToken: context.attemptToken, kind: 'audio', bytes: processed.bytes,
+          metadata: {
+            mimeType: processed.mimeType, extension: processed.extension, outputFormat,
+            providerId: this.manifest.providerId, modelId: request.modelId,
+            durationMs: Math.round(processed.durationSeconds * 1_000), tailTrimmed: true,
+            sourceDurationMs: Math.round(processed.sourceDurationSeconds * 1_000),
+            speechEndMs: Math.round(boundary.speechEndSeconds * 1_000),
+          },
+        });
+        context.reportProgress({ attemptToken: context.attemptToken, fraction: 1, stage: 'saved' });
+        return { artifactIds: [artifact.id] };
+      }
+      const result = await this.client.textToDialogue.convert(body, requestOptions).withRawResponse();
       response = result.data;
       headers = result.rawResponse.headers;
     } else if (request.modelId === 'eleven_text_to_sound_v2') {

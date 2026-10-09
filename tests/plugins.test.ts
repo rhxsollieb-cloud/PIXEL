@@ -60,3 +60,20 @@ test('item 创建拒绝无效长度、结束 tick 溢出、无效参数；nullab
   assert.equal(plugin.manifest.supportedActions.includes('timeline.create'), true);
   assert.equal(plugin.manifest.overlapPolicy, 'reject');
 });
+
+test('创建片段继承稀疏时间线默认配置，显式参数覆盖且设置快照不随时间线变更', () => {
+  const current = timeline();
+  current.itemDefaults = { seed: 23 };
+  const input = { ...itemInput(), timeline: current };
+  const created = plugin.createItem(input);
+  assert.equal(created.params.seed, 23);
+  assert.equal(plugin.createItem({ ...input, params: { seed: null } }).params.seed, null);
+  current.settings.width = 1280;
+  current.itemDefaults.seed = 99;
+  assert.equal(created.generationSettings?.width, 1920);
+  assert.equal(created.params.seed, 23);
+  assert.throws(() => plugin.createItem({ ...input, timeline: { ...current, itemDefaults: { prompt: '正文不可设为默认' } } }));
+  const legacy = timeline();
+  delete legacy.itemDefaults;
+  assert.equal(plugin.createItem({ ...input, timeline: legacy }).params.seed, null);
+});

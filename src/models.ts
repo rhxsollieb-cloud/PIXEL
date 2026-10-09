@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type {
-  DeepReadonly, GenerationRequest, JsonObject, MediaKind,
+  DeepReadonly, GenerationRequest, JsonObject, JsonValue, MediaKind,
 } from './contracts.js';
+import { generationRequestSchema } from './contracts.js';
 import {
   BaseTimelinePlugin,
   type CreateTimelineInput,
@@ -33,6 +34,12 @@ export const speechParamsSchema = z.strictObject({
   languageCode: z.string().regex(/^[a-z]{2,3}$/).nullable().default(null),
   seed: z.number().int().min(0).max(4_294_967_295).nullable().default(null),
   voiceSettings: speechVoiceSettingsSchema.nullable().default(null),
+  contextMode: z.enum(['neighbors', 'manual', 'none']).default('neighbors'),
+  previousText: z.string().refine(value => [...value].length <= 100, 'Speech context allows at most 100 characters').nullable().default(null),
+  nextText: z.string().refine(value => [...value].length <= 100, 'Speech context allows at most 100 characters').nullable().default(null),
+  trimTail: z.boolean().default(true),
+  tailPaddingMs: z.number().int().min(0).max(500).default(40),
+  tailFadeMs: z.number().int().min(0).max(50).default(5),
 });
 export const speechGenerationParamsSchema = speechParamsSchema.superRefine((params, context) => {
   if (params.text.trim().length === 0) context.addIssue({ code: 'custom', path: ['text'], message: 'Speech text is required' });
@@ -138,11 +145,21 @@ export interface ModelDescriptor {
   generationDuration: 'natural' | 'parameter' | 'still';
   referenceKinds: readonly MediaKind[];
   maxReferences: number;
+  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number }[];
   referenceLimitSource: 'endpoint' | 'host';
   fields: readonly PluginFieldDeclaration[];
+  /** 配置默认值仅允许显式非正文参数，不从参数schema猜测内容语义。 */
+  defaultFields: readonly PluginFieldDeclaration[];
+  defaultsSchema: z.ZodType<JsonObject>;
+  contextMaxCharacters?: number;
   settingsSchema: z.ZodType<JsonObject>;
   paramsSchema: z.ZodType<JsonObject>;
   generationParamsSchema: z.ZodType<JsonObject>;
+  /** 正文与必需字符串由模型声明，目录基类不猜测 prompt/text 名称。 */
+  referenceTextFields: readonly string[];
+  requiredTextFields?: readonly string[];
+  /** schema 无法表达的跨字段约束提示；最终执行仍由 generationParamsSchema 校验。 */
+  generationSchemaConstraints?: JsonObject;
 }
 
 const settingsOutputField = (formats: readonly string[]): PluginFieldDeclaration => ({
@@ -160,17 +177,21 @@ const enumField = (scope: 'settings' | 'itemParams', key: string, label: string,
   scope, key, label, valueType: 'enum', options: values.map(value => ({ value, label: value })),
 });
 const supportedActions = [
-  'timeline.create', 'item.createDraft', 'item.create', 'item.move', 'item.resize', 'item.updateParams',
-  'item.delete', 'generation.submit',
+  'timeline.create', 'timeline.settings', 'timeline.defaults', 'timeline.refreshDefaults', 'timeline.delete',
+  'item.createDraft', 'item.create', 'item.move', 'item.resize', 'item.params', 'item.duplicate',
+  'item.delete', 'generation.submit', 'generation.cancel', 'generation.resume', 'asset.saveFromItem',
 ] as const;
 
-export const builtinModelDescriptors: readonly ModelDescriptor[] = [
+type ModelDefinition = Omit<ModelDescriptor, 'defaultFields' | 'defaultsSchema'>;
+const modelDefinitions: readonly ModelDefinition[] = [
   {
     modelId: 'eleven_v4', aliases: [], providerId: 'elevenlabs', providerVersion: '1',
     pluginId: 'pixel.elevenlabs.speech', itemKind: 'audio.speech', title: 'Eleven v4',
-    description: 'Generate speech from text and a selected voice; length follows the spoken text.',
+    description: 'Generate speech from text and a selected voice; length follows the spoken text. Keep each dialogue segment within 2000 characters for reliable generation; the accepted text limit is 10000.',
     outputKind: 'audio', generationDuration: 'natural', referenceKinds: [], maxReferences: 0, referenceLimitSource: 'endpoint',
     settingsSchema: speechSettingsSchema, paramsSchema: speechParamsSchema, generationParamsSchema: speechGenerationParamsSchema,
+    referenceTextFields: ['text'], requiredTextFields: ['text', 'voiceId'],
+    contextMaxCharacters: 100,
     fields: [
       settingsOutputField(speechMp3Formats), promptField('text'),
       { scope: 'itemParams', key: 'voiceId', label: 'Voice', valueType: 'string' },
@@ -181,6 +202,14 @@ export const builtinModelDescriptors: readonly ModelDescriptor[] = [
           { scope: 'itemParams', key: 'stability', label: 'Stability', valueType: 'number' },
           { scope: 'itemParams', key: 'similarityBoost', label: 'Similarity', valueType: 'number' },
         ] },
+      enumField('itemParams', 'contextMode', 'Text context', ['neighbors', 'manual', 'none']),
+      { scope: 'itemParams', key: 'previousText', label: 'Previous text', valueType: 'string', nullable: true,
+        visibleWhen: { field: 'contextMode', equals: 'manual' }, description: 'Reference only; at most 100 characters, never appended to spoken text.' },
+      { scope: 'itemParams', key: 'nextText', label: 'Next text', valueType: 'string', nullable: true,
+        visibleWhen: { field: 'contextMode', equals: 'manual' }, description: 'Reference only; at most 100 characters, never appended to spoken text.' },
+      { scope: 'itemParams', key: 'trimTail', label: 'Trim generated tail', valueType: 'boolean' },
+      { scope: 'itemParams', key: 'tailPaddingMs', label: 'Tail padding (milliseconds)', valueType: 'number', visibleWhen: { field: 'trimTail', equals: true } },
+      { scope: 'itemParams', key: 'tailFadeMs', label: 'Tail fade (milliseconds)', valueType: 'number', visibleWhen: { field: 'trimTail', equals: true } },
     ],
   },
   {
@@ -189,6 +218,7 @@ export const builtinModelDescriptors: readonly ModelDescriptor[] = [
     description: 'Generate sound effects, optionally with a chosen length or a seamless loop.',
     outputKind: 'audio', generationDuration: 'parameter', referenceKinds: [], maxReferences: 0, referenceLimitSource: 'endpoint',
     settingsSchema: soundEffectSettingsSchema, paramsSchema: soundEffectParamsSchema, generationParamsSchema: soundEffectGenerationParamsSchema,
+    referenceTextFields: ['text'], requiredTextFields: ['text'],
     fields: [
       settingsOutputField(speechMp3Formats), promptField('text'),
       { scope: 'itemParams', key: 'durationSeconds', label: 'Duration (seconds)', valueType: 'number', nullable: true, description: 'null lets the model choose a length.' },
@@ -202,6 +232,11 @@ export const builtinModelDescriptors: readonly ModelDescriptor[] = [
     description: 'Compose music from a prompt or a sequence of generation chunks.',
     outputKind: 'audio', generationDuration: 'parameter', referenceKinds: [], maxReferences: 0, referenceLimitSource: 'endpoint',
     settingsSchema: musicSettingsSchema, paramsSchema: musicParamsSchema, generationParamsSchema: musicGenerationParamsSchema,
+    referenceTextFields: ['prompt'],
+    generationSchemaConstraints: { allOf: [{ oneOf: [
+      { properties: { compositionPlan: { type: 'null' }, seed: { type: 'null' }, prompt: { type: 'string', minLength: 1 } } },
+      { properties: { compositionPlan: { type: 'object' }, prompt: { const: '' }, musicLengthMs: { type: 'null' }, forceInstrumental: { const: false } } },
+    ] }] },
     fields: [
       settingsOutputField(musicMp3Formats), promptField(),
       { scope: 'itemParams', key: 'compositionPlan', label: 'Composition plan', valueType: 'object', nullable: true, children: [
@@ -225,7 +260,9 @@ export const builtinModelDescriptors: readonly ModelDescriptor[] = [
     pluginId: 'pixel.openrouter.wan', itemKind: 'video.generated', title: 'Alibaba: Wan 3.0',
     description: 'Generate video from text, first-frame input or reference images.',
     outputKind: 'video', generationDuration: 'parameter', referenceKinds: ['image'], maxReferences: 3, referenceLimitSource: 'host',
+    referenceLimits: [{ field: 'referenceMode', equals: 'firstFrame', maximum: 1 }],
     settingsSchema: wanSettingsSchema, paramsSchema: wanParamsSchema, generationParamsSchema: wanGenerationParamsSchema,
+    referenceTextFields: ['prompt'], requiredTextFields: ['prompt'],
     fields: [
       enumField('settings', 'resolution', 'Resolution', ['480p', '720p', '1080p']),
       enumField('settings', 'aspectRatio', 'Aspect ratio', wanAspectRatios), promptField(),
@@ -240,6 +277,7 @@ export const builtinModelDescriptors: readonly ModelDescriptor[] = [
     description: 'Generate or edit one image using a prompt and up to three reference images.',
     outputKind: 'image', generationDuration: 'still', referenceKinds: ['image'], maxReferences: 3, referenceLimitSource: 'endpoint',
     settingsSchema: grokImageSettingsSchema, paramsSchema: grokImageParamsSchema, generationParamsSchema: grokImageGenerationParamsSchema,
+    referenceTextFields: ['prompt'], requiredTextFields: ['prompt'],
     fields: [
       enumField('settings', 'resolution', 'Resolution', ['1K', '2K']),
       enumField('settings', 'quality', 'Quality', ['low', 'medium']),
@@ -247,6 +285,23 @@ export const builtinModelDescriptors: readonly ModelDescriptor[] = [
     ],
   },
 ];
+
+const contentKeys = new Set(['text', 'prompt', 'compositionPlan', 'previousText', 'nextText']);
+/** 去掉默认值与必填要求，保留叶子约束；默认配置中的缺省键不能变成显式覆盖。 */
+function sparseFieldSchema(schema: z.ZodType): z.ZodType {
+  if (schema instanceof z.ZodDefault) return sparseFieldSchema(schema.removeDefault() as z.ZodType);
+  if (schema instanceof z.ZodNullable) return sparseFieldSchema(schema.unwrap() as z.ZodType).nullable();
+  if (schema instanceof z.ZodObject) {
+    return z.strictObject(Object.fromEntries(Object.entries(schema.shape).map(([key, child]) => [key, sparseFieldSchema(child as z.ZodType).optional()])));
+  }
+  return schema;
+}
+export const builtinModelDescriptors: readonly ModelDescriptor[] = modelDefinitions.map(definition => {
+  const defaultFields = definition.fields.filter(field => field.scope === 'itemParams' && !contentKeys.has(field.key));
+  const shape = (definition.paramsSchema as z.ZodObject).shape as Record<string, z.ZodType>;
+  const defaultsSchema = z.strictObject(Object.fromEntries(defaultFields.map(field => [field.key, sparseFieldSchema(shape[field.key]!).optional()]))) as unknown as z.ZodType<JsonObject>;
+  return { ...definition, defaultFields, defaultsSchema };
+});
 
 export interface ModelDeclaration {
   modelId: string;
@@ -261,11 +316,19 @@ export interface ModelDeclaration {
   generationDuration: ModelDescriptor['generationDuration'];
   referenceKinds: MediaKind[];
   maxReferences: number;
+  referenceLimits?: readonly { field: string; equals: JsonValue; maximum: number }[];
   referenceLimitSource: ModelDescriptor['referenceLimitSource'];
   fields: PluginFieldDeclaration[];
+  defaultFields: PluginFieldDeclaration[];
+  defaultsJsonSchema: JsonObject;
+  contextMaxCharacters?: number;
   settingsJsonSchema: JsonObject;
   paramsJsonSchema: JsonObject;
   generationParamsJsonSchema: JsonObject;
+  paramsDefaults: JsonObject;
+  settingsDefaults: JsonObject;
+  referenceTextFields: readonly string[];
+  requiredTextFields?: readonly string[];
 }
 
 export const modelQuerySchema = z.strictObject({
@@ -302,30 +365,26 @@ export class ModelRegistry {
 
   describe(modelId: string): ModelDeclaration {
     const descriptor = this.resolve(modelId);
-    const { settingsSchema, paramsSchema, generationParamsSchema, ...declaration } = descriptor;
+    const { settingsSchema, paramsSchema, generationParamsSchema, defaultsSchema, generationSchemaConstraints, ...declaration } = descriptor;
     const generationJson = z.toJSONSchema(generationParamsSchema) as JsonObject;
     // Custom cross-field checks remain enforced by prepareRequest and are also discoverable.
-    if (descriptor.modelId === 'music_v2_5') {
-      generationJson.allOf = [{ oneOf: [
-        { properties: { compositionPlan: { type: 'null' }, seed: { type: 'null' }, prompt: { type: 'string', minLength: 1 } } },
-        { properties: { compositionPlan: { type: 'object' }, prompt: { const: '' }, musicLengthMs: { type: 'null' }, forceInstrumental: { const: false } } },
-      ] }];
-    } else {
-      const properties = generationJson.properties as JsonObject;
-      const requiredKey = descriptor.modelId === 'eleven_v4' || descriptor.modelId === 'eleven_text_to_sound_v2' ? 'text' : 'prompt';
-      const field = properties[requiredKey] as JsonObject;
-      field.minLength = 1;
-      field.pattern = '\\S';
-      if (descriptor.modelId === 'eleven_v4') {
-        (properties.voiceId as JsonObject).minLength = 1;
-        (properties.voiceId as JsonObject).pattern = '\\S';
-      }
+    if (generationSchemaConstraints !== undefined) generationJson.allOf = [...(Array.isArray(generationJson.allOf) ? generationJson.allOf : []), structuredClone(generationSchemaConstraints)];
+    const properties = generationJson.properties as JsonObject | undefined;
+    for (const key of descriptor.requiredTextFields ?? []) {
+      const field = properties?.[key] as JsonObject | undefined;
+      if (!field || field.type !== 'string') throw new Error(`Required text field ${key} must be declared as a generation string schema`);
+      field.minLength = Math.max(typeof field.minLength === 'number' ? field.minLength : 0, 1);
+      if (field.pattern === undefined) field.pattern = '\\S';
+      else field.allOf = [...(Array.isArray(field.allOf) ? field.allOf : []), { pattern: '\\S' }];
     }
     return structuredClone({
       ...declaration,
       settingsJsonSchema: z.toJSONSchema(settingsSchema) as JsonObject,
       paramsJsonSchema: z.toJSONSchema(paramsSchema) as JsonObject,
+      defaultsJsonSchema: z.toJSONSchema(defaultsSchema) as JsonObject,
       generationParamsJsonSchema: generationJson,
+      paramsDefaults: paramsSchema.parse({}),
+      settingsDefaults: settingsSchema.parse({}),
     }) as ModelDeclaration;
   }
 
@@ -346,6 +405,7 @@ export class ModelRegistry {
 
   /** 同一个执行边界供 GUI/CLI/Agent 和 SDK providers 使用；不访问凭证或项目状态。 */
   prepareRequest(request: DeepReadonly<GenerationRequest>): GenerationRequest {
+    generationRequestSchema.parse(request);
     const descriptor = this.resolve(request.modelId);
     if (request.providerId !== descriptor.providerId || request.providerVersion !== descriptor.providerVersion) throw new ProviderError('UNSUPPORTED_MODEL', 'The model does not match this provider contract');
     if (request.durationMs !== undefined && (!Number.isSafeInteger(request.durationMs) || request.durationMs <= 0)) throw new ProviderError('INVALID_INPUT', 'durationMs must be a positive safe integer');
@@ -386,6 +446,22 @@ export class ModelRegistry {
     prepared.params = params;
     prepared.settings = settings;
     prepared.references = references;
+    if (descriptor.modelId === 'eleven_v4') {
+      if (params.contextMode === 'none') delete prepared.context;
+      else if (params.contextMode === 'manual') {
+        const manualContext: NonNullable<GenerationRequest['context']> = {};
+        if (typeof params.previousText === 'string' && params.previousText.length > 0) manualContext.previousText = params.previousText;
+        if (typeof params.nextText === 'string' && params.nextText.length > 0) manualContext.nextText = params.nextText;
+        if (Object.keys(manualContext).length > 0) prepared.context = manualContext;
+        else delete prepared.context;
+      }
+    }
+    if (prepared.context !== undefined) {
+      if (descriptor.contextMaxCharacters === undefined) throw new ProviderError('INVALID_INPUT', 'This model does not accept text context');
+      for (const text of Object.values(prepared.context)) {
+        if (typeof text !== 'string' || [...text].length > descriptor.contextMaxCharacters) throw new ProviderError('INVALID_INPUT', 'Text context exceeds the model character limit');
+      }
+    }
     if (durationMs !== undefined) prepared.durationMs = durationMs;
     return prepared;
   }
@@ -398,20 +474,25 @@ export class ModelTimelinePlugin extends BaseTimelinePlugin {
   readonly manifest: TimelinePluginManifest;
   readonly settingsSchema: z.ZodType<JsonObject>;
   readonly itemParamsSchema: z.ZodType<JsonObject>;
+  override readonly itemDefaultsSchema: z.ZodType<JsonObject>;
 
   constructor(readonly descriptor: ModelDescriptor) {
     super();
     this.manifest = {
       pluginId: descriptor.pluginId, name: descriptor.title, schemaVersion: 1,
       modelIds: [descriptor.modelId, ...descriptor.aliases], itemKind: descriptor.itemKind,
-      fields: descriptor.fields, supportedActions, overlapPolicy: 'reject',
+      capabilities: { generation: true, mediaPlacement: true, references: descriptor.maxReferences > 0 },
+      referenceTextFields: descriptor.referenceTextFields,
+      fields: descriptor.fields, defaultFields: descriptor.defaultFields,
+      supportedActions: [...supportedActions, ...(descriptor.maxReferences > 0 ? ['item.reference.add', 'item.reference.remove'] : [])], overlapPolicy: 'reject',
     };
     this.settingsSchema = descriptor.settingsSchema;
     this.itemParamsSchema = descriptor.paramsSchema;
+    this.itemDefaultsSchema = descriptor.defaultsSchema;
   }
 
   override createTimeline(input: CreateTimelineInput) {
-    if (!this.supportsModel(input.modelId)) return super.createTimeline(input);
+    if (input.modelId === undefined || !this.supportsModel(input.modelId)) return super.createTimeline(input);
     return super.createTimeline({ ...input, modelId: this.descriptor.modelId });
   }
 }

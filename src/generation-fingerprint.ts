@@ -12,6 +12,7 @@ export function generationInputFingerprint(request: DeepReadonly<GenerationReque
   };
   return createHash('sha256').update(canonical({
     providerId: request.providerId, providerVersion: request.providerVersion, modelId: request.modelId,
-    params: request.params, settings: request.settings, durationMs: request.durationMs, references: request.references,
+    params: request.params, settings: request.settings, context: request.context,
+    durationMs: request.durationMs, references: request.references,
   })).digest('hex');
 }

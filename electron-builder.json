@@ -4,6 +4,7 @@
   "directories": { "output": "release" },
   "files": ["dist/**/*", "electron/*.mjs", "electron/preload.cjs", "electron/icon.png", "package.json"],
   "asar": true,
+  "asarUnpack": ["node_modules/ffmpeg-static/**"],
   "npmRebuild": false,
   "win": {
     "icon": "electron/icon.ico",

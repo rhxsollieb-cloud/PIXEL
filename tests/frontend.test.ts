@@ -165,6 +165,76 @@ test('hover 不构建命令，drop 拒绝悬空对象、其他项目与被隔离
   assert.equal(builds, 1);
 });
 
+test('外部媒体经共同角色路由放置或入库，类型提示不携带本机文件授权', () => {
+  const paths = new GuiActionPathRegistry();
+  const drag = new DragRegistry({ paths });
+  let builds = 0;
+  drag.register({
+    sourceRole: 'external.media', targetRole: 'timeline.position', actionType: 'media.placeExternal',
+    preview: () => ({ status: 'available' }),
+    buildPayload: ({ source, target }) => {
+      builds += 1;
+      return { kind: source.payload.kind, startTick: Number(target.data.startTick), ...('id' in target.object ? { timelineId: target.object.id } : {}) };
+    },
+  });
+  drag.register({
+    sourceRole: 'external.media', targetRole: 'asset-library', actionType: 'asset.import',
+    preview: () => ({ status: 'available' }), buildPayload: ({ source }) => ({ kind: source.payload.kind }),
+  });
+  const context: DragContext = {
+    project: projectView(),
+    source: { role: 'external.media', payload: { object: { kind: 'project', projectId: 'project' }, kind: 'audio' } },
+    target: { role: 'timeline.position', object: { kind: 'project', projectId: 'project' }, data: jsonView({ startTick: 1500 }) },
+  };
+  assert.equal(drag.hover(context).status, 'available');
+  assert.equal(builds, 0);
+  assert.deepEqual(drag.drop(context), { type: 'media.placeExternal', payload: { kind: 'audio', startTick: 1500 } });
+  assert.deepEqual(drag.drop({ ...context, target: assetDrop().target }), {
+    type: 'media.placeExternal', payload: { kind: 'audio', startTick: 500, timelineId: 'timeline' },
+  });
+  assert.deepEqual(drag.drop({ ...context, target: { role: 'asset-library', object: { kind: 'project', projectId: 'project' }, data: jsonView({}) } }), {
+    type: 'asset.import', payload: { kind: 'audio' },
+  });
+  assert.equal(paths.getPath('media.placeExternal'), 'drag:external.media->timeline.position');
+  assert.equal(paths.getPath('asset.import'), 'drag:external.media->asset-library');
+  assert.throws(() => new ContextActionRegistry({ paths }).register({
+    id: 'another-import', title: '导入素材', actionType: 'asset.import', targetKinds: ['project'],
+    availability: () => ({ status: 'available' }), buildPayload: () => ({}),
+  }), /已绑定 GUI 路径/);
+  const invalidKind = { ...context, source: { ...context.source, payload: { object: { kind: 'project', projectId: 'project' }, kind: 'text' } } } as unknown as DragContext;
+  assert.deepEqual(drag.hover(invalidKind), { status: 'disabled', reason: '拖拽角色与对象类型不匹配' });
+  assert.equal(drag.drop(invalidKind), undefined);
+  const invalidSource = { ...context, source: { role: 'external.media', payload: { object: { kind: 'asset', projectId: 'project', id: 'asset' }, kind: 'image' } } } as unknown as DragContext;
+  assert.equal(drag.drop(invalidSource), undefined);
+  const invalidTarget = { ...context, target: { ...context.target, object: { kind: 'item', projectId: 'project', id: 'item' } } } as DragContext;
+  assert.equal(drag.drop(invalidTarget), undefined);
+});
+
+test('外部媒体也检查项目和顶部详情作用域，不能绕过被隔离的背景', () => {
+  const navigator = new ModalNavigator('project');
+  const drag = new DragRegistry({ paths: new GuiActionPathRegistry(), navigator });
+  drag.register({
+    sourceRole: 'external.media', targetRole: 'timeline.position', actionType: 'media.placeExternal',
+    preview: () => ({ status: 'available' }), buildPayload: () => ({ startTick: 0 }),
+  });
+  const context: DragContext = {
+    project: projectView(),
+    source: { role: 'external.media', payload: { object: { kind: 'project', projectId: 'project' }, kind: 'image' } },
+    target: { role: 'timeline.position', object: { kind: 'project', projectId: 'project' }, data: jsonView({ startTick: 0 }) },
+  };
+  assert.equal(drag.drop(context)?.type, 'media.placeExternal');
+  assert.equal(drag.drop({ ...context, source: { role: 'external.media', payload: { object: { kind: 'project', projectId: 'other' }, kind: 'image' } } }), undefined);
+  assert.equal(drag.drop({ ...context, target: { ...context.target, object: { kind: 'project', projectId: 'other' } } }), undefined);
+  const frame = navigator.open({ kind: 'timeline', projectId: 'project', id: 'timeline' });
+  assert.equal(drag.hover(context).status, 'hidden');
+  assert.equal(drag.drop(context), undefined);
+  assert.equal(drag.drop({ ...context, scopeId: frame.scopeId })?.type, 'media.placeExternal');
+  navigator.push({ kind: 'item', projectId: 'project', id: 'item' });
+  assert.equal(drag.drop({ ...context, scopeId: frame.scopeId }), undefined);
+  navigator.reset();
+  assert.equal(drag.drop(context)?.type, 'media.placeExternal');
+});
+
 test('宿主隐藏 hidden、展示 disabled 原因，并在激活时重新检查', () => {
   const registry = new ContextActionRegistry({ paths: new GuiActionPathRegistry() });
   let disabled = false;

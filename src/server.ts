@@ -3,9 +3,13 @@ import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { DomainError } from './backend.js';
 import { createWorkbench, type Workbench, type WorkbenchOptions } from './workbench.js';
 import { loadBackendConfiguration } from './backend-configuration.js';
+import { queryTimelineText, formatTimelineText } from './timeline-text.js';
+import { timelineRegistry } from './timeline-catalog.js';
+export { preparePixelProjectLocation } from './project-files.js';
 
 export interface ApiOptions {
   frontendPort?: number;
@@ -80,6 +84,10 @@ function scalarHeader(request: IncomingMessage, name: string): string {
   if (typeof value !== 'string') throw new DomainError('INVALID_INPUT', `缺少请求字段：${name}`);
   return value;
 }
+function queryInteger(value: string, field: string): number {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new DomainError('INVALID_INPUT', `${field} 必须为安全非负整数`);
+  return Number(value);
+}
 function rangeOf(header: string, size: number): { start: number; end: number } | undefined {
   const match = /^bytes=(\d*)-(\d*)$/.exec(header);
   if (!match || (!match[1] && !match[2])) return undefined;
@@ -93,6 +101,7 @@ function rangeOf(header: string, size: number): { start: number; end: number } |
 /** 仅绑定 loopback；请求身份由宿主注入，renderer 无法自称 internal。 */
 export function createApiServer(workbench: Workbench, options: ApiOptions = {}): Server {
   const frontendPort = options.frontendPort ?? 4310;
+  const sessionId = randomUUID();
   const server = createServer((request, response) => {
     void (async () => {
       const address = server.address();
@@ -100,6 +109,9 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
       if (!trustedOrigin(request, apiPort, frontendPort)) { json(response, 403, { ok: false, error: { code: 'FORBIDDEN', message: '请求来源不在本地工作台范围内' } }); return; }
       if (!hasDesktopSession(request, options.sessionToken)) { json(response, 403, { ok: false, error: { code: 'FORBIDDEN', message: '桌面会话无效' } }); return; }
       const url = new URL(request.url ?? '/', `http://127.0.0.1:${apiPort}`);
+      if (request.method === 'GET' && url.pathname === '/api/session') {
+        json(response, 200, { projectId: workbench.projectId, sessionId }); return;
+      }
       if (options.frontendDirectory && (request.method === 'GET' || request.method === 'HEAD') && !url.pathname.startsWith('/api/')) {
         if (await serveFrontend(request, response, url.pathname, options.frontendDirectory)) return;
       }
@@ -114,6 +126,41 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
           ...(query.has('outputKind') ? { outputKind: query.get('outputKind') as 'image' | 'audio' | 'video' } : {}),
           exclude: query.getAll('exclude'),
         })); return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/timeline-types') {
+        const query = url.searchParams;
+        const allowed = new Set(['limit','cursor','exclude','mode','providerId','outputKind','search']);
+        if ([...query.keys()].some(key => !allowed.has(key))) throw new DomainError('INVALID_INPUT', '时间线目录查询包含未知字段');
+        json(response, 200, workbench.timelineTypes({
+          ...(query.has('limit') ? { limit: queryInteger(query.get('limit')!, 'limit') } : {}),
+          ...(query.has('cursor') ? { cursor: query.get('cursor')! } : {}), exclude: query.getAll('exclude'),
+          ...Object.fromEntries(['mode','providerId','outputKind','search'].filter(key => query.has(key)).map(key => [key,query.get(key)!])),
+        })); return;
+      }
+      if (request.method === 'GET' && url.pathname.startsWith('/api/timeline-types/')) {
+        let typeId: string;
+        try { typeId = decodeURIComponent(url.pathname.slice('/api/timeline-types/'.length)); }
+        catch { throw new DomainError('INVALID_INPUT', '时间线类型编码无效'); }
+        if (!typeId.length || typeId.length > 200 || typeId.includes('\0')) throw new DomainError('INVALID_INPUT', '时间线类型标识无效');
+        try { json(response, 200, timelineRegistry.describe(typeId)); }
+        catch (error) { if (error instanceof DomainError) throw error; throw new DomainError('NOT_FOUND', '时间线类型不存在'); }
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/timeline-text') {
+        const query = url.searchParams;
+        const allowed = new Set(['timelineId','fromMs','toMs','search','includeGenerated','limit','maxCharacters','cursor','format']);
+        if ([...query.keys()].some(key => !allowed.has(key))) throw new DomainError('INVALID_INPUT', '文本查询包含未知字段');
+        if (query.has('includeGenerated') && !['true','false'].includes(query.get('includeGenerated')!)) throw new DomainError('INVALID_INPUT', 'includeGenerated 必须为 true 或 false');
+        const format = query.get('format') ?? 'json';
+        if (!['json','text'].includes(format)) throw new DomainError('INVALID_INPUT', '文本格式必须为 json 或 text');
+        const page = queryTimelineText(await workbench.snapshot(), {
+          includeGenerated: query.get('includeGenerated') === 'true',
+          ...Object.fromEntries(['timelineId','search','cursor'].filter(key => query.has(key)).map(key => [key,query.get(key)!])),
+          ...Object.fromEntries(['fromMs','toMs','limit','maxCharacters'].filter(key => query.has(key)).map(key => [key,queryInteger(query.get(key)!, key)])),
+        });
+        if (format === 'json') { json(response, 200, page); return; }
+        response.writeHead(200, { 'Content-Type':'text/plain; charset=utf-8', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff' });
+        response.end(formatTimelineText(page)); return;
       }
       if (request.method === 'GET' && url.pathname === '/api/jobs') { json(response, 200, await workbench.jobs()); return; }
       if (request.method === 'GET' && url.pathname === '/api/status') { json(response, 200, { providers: workbench.providers }); return; }
@@ -134,6 +181,9 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
         json(response, 200, await workbench.execute(value)); return;
       }
       if (request.method === 'POST' && url.pathname === '/api/import') {
+        if (request.headers['x-pixel-project-id'] !== undefined && request.headers['x-pixel-project-id'] !== workbench.projectId) {
+          throw new DomainError('FORBIDDEN', '素材导入不属于当前项目');
+        }
         const mimeType = scalarHeader(request, 'content-type').split(';')[0]!.trim().toLowerCase();
         const requestId = scalarHeader(request, 'x-pixel-request-id');
         const revision = scalarHeader(request, 'x-pixel-revision');
@@ -142,6 +192,20 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
         try { name = decodeURIComponent(scalarHeader(request, 'x-pixel-name')); }
         catch { throw new DomainError('INVALID_INPUT', '文件名编码无效'); }
         json(response, 200, await workbench.importMedia({ bytes: await bytes(request, 256 * 1024 * 1024), mimeType, name, requestId, expectedRevision: Number(revision) })); return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/media-place') {
+        if (scalarHeader(request, 'x-pixel-project-id') !== workbench.projectId) throw new DomainError('FORBIDDEN', '媒体放置不属于当前项目');
+        const mimeType = scalarHeader(request, 'content-type').split(';')[0]!.trim().toLowerCase();
+        const requestId = scalarHeader(request, 'x-pixel-request-id');
+        const expectedRevision = queryInteger(scalarHeader(request, 'x-pixel-revision'), '项目版本');
+        const startTick = queryInteger(scalarHeader(request, 'x-pixel-start-tick'), '放置位置');
+        let name: string;
+        try { name = decodeURIComponent(scalarHeader(request, 'x-pixel-name')); }
+        catch { throw new DomainError('INVALID_INPUT', '文件名编码无效'); }
+        const timelineId = request.headers['x-pixel-timeline-id'];
+        if (timelineId !== undefined && (typeof timelineId !== 'string' || !timelineId.length || timelineId.length > 200)) throw new DomainError('INVALID_INPUT', '媒体时间线标识无效');
+        json(response, 200, await workbench.placeExternalMedia({ bytes: await bytes(request, 256 * 1024 * 1024), mimeType, name, requestId, expectedRevision, startTick,
+          ...(timelineId === undefined ? {} : { timelineId }) })); return;
       }
       if ((request.method === 'GET' || request.method === 'HEAD') && /^\/api\/media\/[^/]+$/.test(url.pathname)) {
         const id = decodeURIComponent(url.pathname.slice('/api/media/'.length));

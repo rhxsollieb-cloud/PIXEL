@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import type { GenerationArtifact, GenerationRequest, JsonObject } from '../src/contracts.js';
-import { createSdkFetch, ProviderError, type ArtifactWriteRequest, type ProviderRunContext } from '../src/generation.js';
-import { ElevenLabsModelProvider } from '../src/providers/elevenlabs.js';
+import { createSdkFetch, ProviderError, type ArtifactWriteRequest, type ProviderRunContext, type AudioPostProcessor, type AudioTailProcessingRequest } from '../src/generation.js';
+import { ElevenLabsModelProvider, speechTailBoundary } from '../src/providers/elevenlabs.js';
 
 const audio = new Uint8Array([0x49, 0x44, 0x33, 0x04, 0, 0, 0, 0, 0, 0, 1, 2, 3]);
 
@@ -11,11 +11,11 @@ function request(modelId: string, params: JsonObject): GenerationRequest {
   return {
     projectId: 'project_test', targetItemId: 'item_test', generationToken: 'generation_test',
     inputFingerprint: 'fingerprint_test', providerId: 'elevenlabs', providerVersion: '1',
-    modelId, params, references: [],
+    modelId, params: modelId === 'eleven_v4' ? { trimTail: false, ...params } : params, references: [],
   };
 }
 
-function harness(fetch: typeof globalThis.fetch, options: { timeoutMs?: number; signal?: AbortSignal } = {}) {
+function harness(fetch: typeof globalThis.fetch, options: { timeoutMs?: number; signal?: AbortSignal; audioProcessor?: AudioPostProcessor } = {}) {
   const writes: { request: ArtifactWriteRequest; bytes: Uint8Array }[] = [];
   const progress: number[] = [];
   const client = new ElevenLabsClient({ apiKey: 'test_key', fetch: createSdkFetch(fetch), logging: { silent: true } });
@@ -55,7 +55,20 @@ function mp3Response(headers: Record<string, string> = {}): Response {
   return new Response(stream, { headers: { 'content-type': 'audio/mpeg', ...headers } });
 }
 
-test('Eleven v4 通过真实 SDK 编码 voice 路径、模型与参数，流保存携带当前 attempt', async () => {
+function timestampResponse(text = 'Hello!', options: { audioBase64?: string; alignment?: unknown } = {}): Response {
+  const characters = Array.from(text);
+  return new Response(JSON.stringify({
+    audio_base64: options.audioBase64 ?? Buffer.from(audio).toString('base64'),
+    alignment: Object.hasOwn(options, 'alignment') ? options.alignment : {
+      characters,
+      character_start_times_seconds: characters.map((_, index) => index * 0.1),
+      character_end_times_seconds: characters.map((_, index) => (index + 1) * 0.1),
+    },
+    voice_segments: [],
+  }), { headers: { 'content-type': 'application/json' } });
+}
+
+test('Eleven v4 通过真实 SDK Dialogue 编码单条正文、音色设置，流保存携带当前 attempt', async () => {
   const calls: { url: string; body: Record<string, unknown>; signal: AbortSignal | null | undefined }[] = [];
   const h = harness(async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal });
@@ -67,11 +80,11 @@ test('Eleven v4 通过真实 SDK 编码 voice 路径、模型与参数，流保�
     voiceSettings: { stability: 0, similarityBoost: 0.75 },
   }), h.context);
   assert.equal(calls.length, 1);
-  assert.equal(new URL(calls[0]!.url).pathname, '/v1/text-to-speech/voice_test');
+  assert.equal(new URL(calls[0]!.url).pathname, '/v1/text-to-dialogue');
   assert.equal(new URL(calls[0]!.url).searchParams.get('output_format'), 'mp3_44100_128');
   assert.deepEqual(calls[0]!.body, {
-    text: '[excited] Hello!', model_id: 'eleven_v4', language_code: 'en', seed: 0,
-    voice_settings: { stability: 0, similarity_boost: 0.75 },
+    inputs: [{ text: '[excited] Hello!', voice_id: 'voice_test' }], model_id: 'eleven_v4', language_code: 'en', seed: 0,
+    settings: { stability: 0, similarity: 0.75 },
   });
   assert.ok(calls[0]!.signal instanceof AbortSignal);
   assert.deepEqual(result, { artifactIds: ['artifact_1'] });
@@ -219,5 +232,108 @@ test('用户取消流消费后返回 CANCELED，不能将半个音频挂为结�
   setTimeout(() => controller.abort(), 20);
   await assert.rejects(generation, (error: unknown) => error instanceof ProviderError && error.code === 'CANCELED');
   assert.equal(canceled, true);
+  assert.equal(h.writes.length, 0);
+});
+
+test('v4 捕获邻居上下文映射为 previous_text/future_text，正文保持单条输入；时间戳去尾后才存产物', async () => {
+  let body: Record<string, unknown> = {};
+  let processing: AudioTailProcessingRequest | undefined;
+  const h = harness(async (url, init) => {
+    assert.equal(new URL(String(url)).pathname, '/v1/text-to-dialogue/with-timestamps');
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return timestampResponse();
+  }, { audioProcessor: {
+    async trimTail(value, signal) {
+      signal.throwIfAborted(); processing = value;
+      return { bytes: audio, mimeType: 'audio/mpeg', extension: 'mp3', sourceDurationSeconds: 1, durationSeconds: 0.54 };
+    },
+  } });
+  const input = request('eleven_v4', {
+    text: '[excited] Hello!', voiceId: 'voice_test', trimTail: true,
+    previousText: 'unused manual previous', nextText: 'unused manual next', contextMode: 'neighbors',
+  });
+  input.context = { previousText: 'Before.', nextText: 'After.' };
+  await h.provider.generate(input, h.context);
+  assert.deepEqual(body.inputs, [{ text: '[excited] Hello!', voice_id: 'voice_test' }]);
+  assert.equal(body.previous_text, 'Before.');
+  assert.equal(body.future_text, 'After.');
+  assert.equal(body.next_text, undefined);
+  assert.equal(processing?.speechEndSeconds, 0.5);
+  assert.equal(processing?.paddingMs, 40);
+  assert.equal(processing?.fadeMs, 5);
+  assert.deepEqual(Array.from(processing!.bytes), Array.from(audio));
+  assert.equal(h.writes[0]!.request.metadata.tailTrimmed, true);
+  assert.equal(h.writes[0]!.request.metadata.durationMs, 540);
+  assert.equal(h.writes[0]!.request.metadata.sourceDurationMs, 1_000);
+});
+
+test('manual / none 上下文模式严格决定 SDK 参考字段，关闭去尾只请求原始流', async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const h = harness(async (url, init) => {
+    assert.equal(new URL(String(url)).pathname, '/v1/text-to-dialogue');
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return mp3Response();
+  });
+  for (const contextMode of ['manual', 'none'] as const) {
+    const input = request('eleven_v4', {
+      text: 'Hello!', voiceId: 'voice_test', contextMode, previousText: 'Manual previous', nextText: 'Manual future',
+    });
+    input.context = { previousText: 'Neighbor previous', nextText: 'Neighbor next' };
+    await h.provider.generate(input, h.context);
+  }
+  assert.equal(bodies[0]!.previous_text, 'Manual previous');
+  assert.equal(bodies[0]!.future_text, 'Manual future');
+  assert.equal(bodies[1]!.previous_text, undefined);
+  assert.equal(bodies[1]!.future_text, undefined);
+});
+
+test('正文时间戳忽略尾标点和表演标签，识别 Unicode 扩展字，并标明多读后文边界', () => {
+  assert.deepEqual(speechTailBoundary('[calm] 𠮷你好！', {
+    characters: ['𠮷', '你', '好', '！', '下', '句'],
+    characterStartTimesSeconds: [0, 0.1, 0.2, 0.3, 0.7, 0.8],
+    characterEndTimesSeconds: [0.1, 0.2, 0.3, 0.6, 0.8, 0.9],
+  }), { speechEndSeconds: 0.3, nextSpeechStartSeconds: 0.7 });
+  for (const invalid of [
+    undefined,
+    { characters: ['H'], characterStartTimesSeconds: [], characterEndTimesSeconds: [1] },
+    { characters: ['X'], characterStartTimesSeconds: [0], characterEndTimesSeconds: [1] },
+    { characters: ['H'], characterStartTimesSeconds: [0], characterEndTimesSeconds: [NaN] },
+    { characters: ['H'], characterStartTimesSeconds: [0.2], characterEndTimesSeconds: [0.1] },
+  ]) {
+    assert.throws(() => speechTailBoundary('H', invalid), (error: unknown) => error instanceof ProviderError && error.code === 'INVALID_OUTPUT');
+  }
+});
+
+test('去尾需要有效时间戳和 base64；缺失/错文/错乱时明确失败，不自动重试或保存原始尾音', async () => {
+  let processorCalls = 0;
+  for (const response of [
+    timestampResponse('Hello!', { alignment: null }), timestampResponse('Different.'),
+    timestampResponse('Hello!', { audioBase64: 'not_valid_base64' }),
+  ]) {
+    let requests = 0;
+    const h = harness(async () => { requests++; return response; }, { audioProcessor: {
+      async trimTail() { processorCalls++; throw new Error('must not process invalid timing'); },
+    } });
+    await assert.rejects(h.provider.generate(request('eleven_v4', { text: 'Hello!', voiceId: 'voice_test', trimTail: true }), h.context),
+      (error: unknown) => error instanceof ProviderError && error.code === 'INVALID_OUTPUT');
+    assert.equal(requests, 1);
+    assert.equal(h.writes.length, 0);
+  }
+  assert.equal(processorCalls, 0);
+});
+
+test('去尾处理仍受共同超时控制，迟到编码不能保存成功产物', async () => {
+  let release: (() => void) | undefined;
+  const h = harness(async () => timestampResponse(), { timeoutMs: 30, audioProcessor: {
+    async trimTail(_request, signal) {
+      await new Promise<void>((resolve) => { release = resolve; });
+      assert.equal(signal.aborted, true);
+      return { bytes: audio, mimeType: 'audio/mpeg', extension: 'mp3', sourceDurationSeconds: 1, durationSeconds: 0.54 };
+    },
+  } });
+  await assert.rejects(h.provider.generate(request('eleven_v4', { text: 'Hello!', voiceId: 'voice_test', trimTail: true }), h.context),
+    (error: unknown) => error instanceof ProviderError && error.code === 'TIMEOUT');
+  assert.ok(release); release();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.equal(h.writes.length, 0);
 });

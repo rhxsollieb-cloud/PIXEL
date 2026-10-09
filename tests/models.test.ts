@@ -169,3 +169,39 @@ test('规范化请求与返回字段schema不污染调用者输入', () => {
   (description.paramsJsonSchema.properties as JsonObject).text = { type: 'number' };
   assert.equal(((modelRegistry.describe('eleven_v4').paramsJsonSchema.properties as JsonObject).text as JsonObject).type, 'string');
 });
+
+test('模型默认配置显式排除正文且保持稀疏，嵌套音色默认值也不会被补全', () => {
+  const speech = modelRegistry.createPlugin('eleven_v4');
+  assert.deepEqual(speech.validateItemDefaults({}), {});
+  assert.deepEqual(speech.validateItemDefaults({ voiceSettings: { stability: 0.3 } }), { voiceSettings: { stability: 0.3 } });
+  assert.deepEqual(speech.validateItemDefaults({ voiceId: '' }), { voiceId: '' });
+  const effective = speech.resolveItemDefaults({ voiceId: 'selected' });
+  assert.equal(effective.trimTail, true);
+  assert.equal(effective.tailPaddingMs, 40);
+  assert.equal(effective.voiceId, 'selected');
+  assert.equal(Object.hasOwn(effective, 'text'), false);
+  assert.equal(Object.hasOwn(effective, 'previousText'), false);
+  for (const forbidden of ['text', 'previousText', 'nextText', 'unknown']) assert.throws(() => speech.validateItemDefaults({ [forbidden]: 'ignored?' }));
+  assert.throws(() => speech.validateItemDefaults({ voiceSettings: { speed: 1.2 } }));
+  assert.throws(() => speech.validateItemDefaults({ trimTail: undefined }));
+  const declaration = modelRegistry.describe('eleven_v4');
+  assert.deepEqual(declaration.paramsDefaults.contextMode, 'neighbors');
+  assert.equal(declaration.contextMaxCharacters, 100);
+  assert.ok(declaration.defaultFields.some(field => field.key === 'voiceSettings'));
+  assert.equal(declaration.defaultFields.some(field => ['text', 'previousText', 'nextText'].includes(field.key)), false);
+  assert.equal(JSON.stringify(declaration.defaultsJsonSchema).includes('"default"'), false);
+  assert.throws(() => modelRegistry.createPlugin('music_v2_5').validateItemDefaults({ compositionPlan: plan }));
+});
+
+test('语音上下文按模式捕获，100字上限按Unicode码点而非UTF16计数', () => {
+  const manual = modelRegistry.prepareRequest(request('eleven_v4', { text: '正文', voiceId: 'voice_1', contextMode: 'manual', previousText: '🙂'.repeat(100), nextText: '后文' }));
+  assert.equal([...manual.context!.previousText!].length, 100);
+  assert.deepEqual(manual.context?.nextText, '后文');
+  assert.throws(() => speechParamsSchema.parse({ previousText: '🙂'.repeat(101) }));
+  const none = modelRegistry.prepareRequest({ ...request('eleven_v4', { text: '正文', voiceId: 'voice_1', contextMode: 'none' }), context: { previousText: 'ignored' } });
+  assert.equal(none.context, undefined);
+  assert.throws(() => modelRegistry.prepareRequest({ ...request('eleven_v4', { text: '正文', voiceId: 'voice_1' }), context: { previousText: 'x'.repeat(101) } }), code('INVALID_INPUT'));
+  assert.throws(() => modelRegistry.prepareRequest({ ...request('x-ai/grok-imagine-image-2.0', { prompt: 'cat' }), context: { nextText: 'not supported' } }), code('INVALID_INPUT'));
+  const unknownContext = { ...request('eleven_v4', { text: '正文', voiceId: 'voice_1' }), context: { previousText: 'valid', privateFilePath: 'not allowed' } };
+  assert.throws(() => modelRegistry.prepareRequest(unknownContext));
+});

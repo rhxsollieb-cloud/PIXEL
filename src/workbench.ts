@@ -1,22 +1,24 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { link, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import {
   ActionExecutor, ActionRegistry, BaseActionHandler, DomainError, MoveItemHandler,
   assertProjectInvariants,
-  type ActionMutation, type CommitResult, type HistoryEntry, type ProjectRepository,
+  type ActionMutation, type CommitResult, type ProjectRepository,
 } from './backend.js';
 import type {
   ActionEnvelope, ActionReceipt, ActionResult, AssetData, CallerContext, GenerationJob,
   GenerationRequest, JsonObject, ProjectChanged, ProjectDocument, ProjectSnapshot, TimelineItemData,
 } from './contracts.js';
-import { generationRequestSchema } from './contracts.js';
 import { modelRegistry, modelQuerySchema } from './models.js';
+import { referenceLimit, timelineRegistry, timelineTypeQuerySchema } from './timeline-catalog.js';
+import { probeMediaDuration } from './media-metadata.js';
 import { ProviderError, transitionJob, type GenerationProgress } from './generation.js';
 import type { GenerationRunner } from './runtime.js';
 import { generationInputFingerprint } from './generation-fingerprint.js';
 import { FileArtifactStore } from './storage.js';
+import { readWorkbenchProjectFile, validateWorkbenchProjectFile, workbenchOutboxSchema, type WorkbenchOutboxEntry as OutboxEntry, type WorkbenchProjectFile as WorkbenchFile } from './project-files.js';
 
 export const WORKBENCH_PROJECT_ID = 'pixel-project';
 const idSchema = z.string().min(1).max(200);
@@ -26,23 +28,6 @@ const jsonSchema = z.record(z.string(), z.json());
 const assetSchema = z.strictObject({ id: z.uuid(), kind: z.enum(['image', 'audio', 'video']), fileRef: z.string().max(500), metadata: jsonSchema });
 const jobStates = ['queued', 'running', 'cancelRequested', 'succeeded', 'failed', 'canceled', 'interrupted'] as const;
 
-interface OutboxEntry {
-  id: string;
-  operation: 'start' | 'resume' | 'cancel';
-  jobId: string;
-  itemId: string;
-  request?: GenerationRequest;
-  done: boolean;
-}
-interface WorkbenchFile {
-  version: 1;
-  snapshot: ProjectSnapshot;
-  requests: Record<string, { signature: string; receipt: ActionReceipt }>;
-  history: HistoryEntry[];
-  outbox: OutboxEntry[];
-}
-const outboxSchema = z.strictObject({ id: z.uuid(), operation: z.enum(['start', 'resume', 'cancel']), jobId: z.uuid(), itemId: idSchema, request: generationRequestSchema.optional(), done: z.boolean() })
-  .refine(entry => entry.operation !== 'start' || (entry.request !== undefined && entry.request.projectId === WORKBENCH_PROJECT_ID && entry.request.targetItemId === entry.itemId), 'Start outbox requires its matching captured request');
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value !== null && typeof value === 'object') {
@@ -51,13 +36,15 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value) ?? 'null';
 }
-async function atomicFile(path: string, value: unknown): Promise<void> {
+async function atomicFile(path: string, value: unknown, createOnly = false): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const handle = await open(temporary, 'wx', 0o600);
     try { await handle.writeFile(JSON.stringify(value)); await handle.sync(); }
     finally { await handle.close(); }
-    await rename(temporary, path);
+    // Publishing a new project never overwrites a file that appeared during preparation.
+    if (createOnly) await link(temporary, path);
+    else await rename(temporary, path);
   } finally { await unlink(temporary).catch(() => {}); }
 }
 
@@ -65,6 +52,7 @@ async function atomicFile(path: string, value: unknown): Promise<void> {
 export class FileWorkbenchRepository implements ProjectRepository {
   private serial: Promise<unknown> = Promise.resolve();
   private constructor(private readonly path: string, private state: WorkbenchFile) {}
+  get projectId(): string { return this.state.snapshot.document.id; }
 
   static async open(directory: string, initial: ProjectSnapshot): Promise<FileWorkbenchRepository> {
     const root = resolve(directory);
@@ -72,17 +60,18 @@ export class FileWorkbenchRepository implements ProjectRepository {
     const path = join(root, 'project.json');
     let state: WorkbenchFile;
     try {
-      state = JSON.parse(await readFile(path, 'utf8')) as WorkbenchFile;
-      if (state.version !== 1 || state.snapshot.document.id !== WORKBENCH_PROJECT_ID
-          || !Number.isSafeInteger(state.snapshot.revision) || state.snapshot.revision < 0
-          || !Array.isArray(state.history) || !Array.isArray(state.outbox) || !state.requests) throw new Error('Invalid project storage');
-      assertProjectInvariants(state.snapshot.document);
-      state.outbox.forEach(entry => outboxSchema.parse(entry));
+      state = await readWorkbenchProjectFile(root);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new DomainError('INTERNAL', '项目存储无法读取，请保留文件后检查版本');
-      assertProjectInvariants(initial.document);
-      state = { version: 1, snapshot: structuredClone(initial), requests: {}, history: [], outbox: [] };
-      await atomicFile(path, state);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        if (error instanceof DomainError) throw error;
+        throw new DomainError('INTERNAL', '项目存储无法读取，请保留文件后检查版本');
+      }
+      state = validateWorkbenchProjectFile({ version: 1, snapshot: structuredClone(initial), requests: {}, history: [], outbox: [] });
+      try { await atomicFile(path, state, true); }
+      catch (writeError) {
+        if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') throw writeError;
+        state = await readWorkbenchProjectFile(root);
+      }
     }
     return new FileWorkbenchRepository(path, state);
   }
@@ -133,7 +122,8 @@ export class FileWorkbenchRepository implements ProjectRepository {
       if (draft.id !== envelope.projectId || !z.json().safeParse(mutation.outcome).success) throw new DomainError('INVALID_INPUT', '动作结果无效');
       const command = mutation.outcome.generationCommand;
       if (command !== undefined) {
-        const entry = outboxSchema.parse(command) as OutboxEntry;
+        const entry = workbenchOutboxSchema.parse(command) as OutboxEntry;
+        if (entry.request && entry.request.projectId !== draft.id) throw new DomainError('INVALID_INPUT', '生成记录不属于当前项目');
         if (entry.operation === 'start' && next.outbox.some(current => !current.done && current.operation === 'start' && current.itemId === entry.itemId)) {
           throw new DomainError('NOT_APPLICABLE', '该片段的生成任务尚未结束');
         }
@@ -181,8 +171,13 @@ function itemOf(document: ProjectDocument, id: string): TimelineItemData {
 function timelineOf(document: ProjectDocument, id: string) {
   const timeline = Object.hasOwn(document.timelines, id) ? document.timelines[id] : undefined;
   if (!timeline) throw new DomainError('NOT_FOUND', '时间线不存在');
-  const descriptor = modelRegistry.resolve(timeline.modelId);
-  if (timeline.pluginId !== descriptor.pluginId || timeline.pluginVersion !== 1) throw new DomainError('NOT_APPLICABLE', '该时间线需要显式插件版本迁移后才能编辑');
+  timelineRegistry.forTimeline(timeline);
+  return timeline;
+}
+function timelineAction(document: ProjectDocument, timelineId: string, action: string) {
+  const timeline = timelineOf(document, timelineId);
+  const plugin = timelineRegistry.forTimeline(timeline);
+  if (!plugin.manifest.supportedActions.includes(action)) throw new DomainError('NOT_APPLICABLE', '该时间线不支持此操作');
   return timeline;
 }
 function assetOf(document: ProjectDocument, id: string): AssetData {
@@ -190,28 +185,59 @@ function assetOf(document: ProjectDocument, id: string): AssetData {
   if (!asset) throw new DomainError('NOT_FOUND', '资产不存在');
   return asset;
 }
-function invalidate(item: TimelineItemData): void { item.generationToken = randomUUID(); delete item.outputAssetId; }
+function invalidate(document: ProjectDocument, item: TimelineItemData): void {
+  item.generationToken = randomUUID();
+  const output = item.outputAssetId === undefined ? undefined : document.assets[item.outputAssetId];
+  // New records state provenance explicitly. Legacy imported media is safe to
+  // retain; only an identifiable generation output is disconnected.
+  if (item.outputOrigin === 'generated' || (item.outputOrigin === undefined && output?.metadata.imported !== true && typeof output?.metadata.providerId === 'string')) {
+    delete item.outputAssetId;
+    delete item.outputOrigin;
+  }
+}
 function placement(document: ProjectDocument, timelineId: string, startTick: number, durationTicks: number, excludeId?: string): void {
   if (!Number.isSafeInteger(startTick + durationTicks)) throw new DomainError('INVALID_INPUT', '时间范围超出支持范围');
   const timeline = timelineOf(document, timelineId);
+  if (timelineRegistry.forTimeline(timeline).manifest.overlapPolicy === 'allow') return;
   const conflict = timeline.itemIds.some(id => {
     const item = document.items[id]!;
     return id !== excludeId && startTick < item.startTick + item.durationTicks && item.startTick < startTick + durationTicks;
   });
   if (conflict) throw new DomainError('NOT_APPLICABLE', '当前位置与已有片段重叠');
 }
-function captureRequest(document: ProjectDocument, item: TimelineItemData): GenerationRequest {
+/** A single pure capture path is used by submission and late-result checks. */
+export function captureGenerationRequest(document: ProjectDocument, item: TimelineItemData): GenerationRequest {
   const timeline = timelineOf(document, item.timelineId);
+  if (!timelineRegistry.forTimeline(timeline).manifest.capabilities.generation || timeline.modelId === undefined) throw new DomainError('NOT_APPLICABLE', '本地时间线不会启动模型生成');
   const descriptor = modelRegistry.resolve(timeline.modelId);
   const request: GenerationRequest = {
     projectId: document.id, targetItemId: item.id, generationToken: item.generationToken,
     inputFingerprint: 'pending', providerId: descriptor.providerId, providerVersion: descriptor.providerVersion,
-    modelId: descriptor.modelId, params: structuredClone(item.params), settings: structuredClone(timeline.settings),
+    modelId: descriptor.modelId, params: structuredClone(item.params), settings: structuredClone(item.generationSettings ?? timeline.settings),
     references: item.referenceAssetIds.map(id => {
       const asset = structuredClone(assetOf(document, id));
       return descriptor.modelId === 'alibaba/wan-3.0' && item.params.referenceMode === 'firstFrame' ? { ...asset, role: 'first-frame' as const } : asset;
     }),
   };
+  if (descriptor.modelId === 'eleven_v4') {
+    const params = modelRegistry.createPlugin(timeline.modelId).validateItemParams(item.params);
+    const context: NonNullable<GenerationRequest['context']> = {};
+    if (params.contextMode === 'manual') {
+      if (typeof params.previousText === 'string' && params.previousText.length > 0) context.previousText = params.previousText;
+      if (typeof params.nextText === 'string' && params.nextText.length > 0) context.nextText = params.nextText;
+    } else if (params.contextMode === 'neighbors' && typeof params.voiceId === 'string' && params.voiceId.trim().length > 0) {
+      const speechItems = timeline.itemIds.map(id => itemOf(document, id))
+        .filter(candidate => candidate.kind === descriptor.itemKind && typeof candidate.params.text === 'string' && candidate.params.text.trim().length > 0)
+        .sort((left, right) => left.startTick - right.startTick || left.id.localeCompare(right.id));
+      const index = speechItems.findIndex(candidate => candidate.id === item.id);
+      const maximum = descriptor.contextMaxCharacters!;
+      const previous = index > 0 ? speechItems[index - 1] : undefined;
+      const next = index >= 0 ? speechItems[index + 1] : undefined;
+      if (previous && previous.params.voiceId === params.voiceId) context.previousText = [...(previous.params.text as string)].slice(-maximum).join('');
+      if (next && next.params.voiceId === params.voiceId) context.nextText = [...(next.params.text as string)].slice(0, maximum).join('');
+    }
+    if (Object.keys(context).length > 0) request.context = context;
+  }
   const prepared = modelRegistry.prepareRequest(request);
   prepared.inputFingerprint = generationInputFingerprint(prepared);
   return prepared;
@@ -231,7 +257,7 @@ export interface WorkbenchOptions {
 }
 
 export class Workbench {
-  readonly projectId = WORKBENCH_PROJECT_ID;
+  readonly projectId: string;
   readonly artifacts: FileArtifactStore;
   readonly registry = new ActionRegistry();
   readonly executor: ActionExecutor;
@@ -246,10 +272,14 @@ export class Workbench {
   private readonly drains = new Set<Promise<void>>();
   private closing = false;
   private readonly imports = new Map<string, Promise<ActionResult>>();
-  private readonly caller: CallerContext = { actorId: 'local-gui', source: 'gui', projectIds: new Set([WORKBENCH_PROJECT_ID]), permissions: new Set(['project.edit', 'generation.submit']) };
-  private readonly internal: CallerContext = { actorId: 'generation-host', source: 'internal', projectIds: new Set([WORKBENCH_PROJECT_ID]), permissions: new Set(['generation.apply']) };
+  private readonly mediaReads = new Set<AbortController>();
+  private readonly caller: CallerContext;
+  private readonly internal: CallerContext;
 
   constructor(readonly repository: FileWorkbenchRepository, readonly runner: GenerationRunner | undefined, directory: string, providers: { elevenlabs: boolean; openrouter: boolean }) {
+    this.projectId = repository.projectId;
+    this.caller = { actorId: 'local-gui', source: 'gui', projectIds: new Set([this.projectId]), permissions: new Set(['project.edit', 'generation.submit']) };
+    this.internal = { actorId: 'generation-host', source: 'internal', projectIds: new Set([this.projectId]), permissions: new Set(['generation.apply']) };
     this.providers = providers;
     this.artifacts = runner?.artifacts ?? new FileArtifactStore(join(directory, 'artifacts'));
     this.executor = new ActionExecutor(repository, this.registry, event => this.publish(event));
@@ -277,14 +307,25 @@ export class Workbench {
     }) };
   }
   async execute(envelope: unknown): Promise<ActionResult> {
+    if (this.closing) return { ok: false, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
     await this.jobs();
+    if (this.closing) return { ok: false, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
     const result = await this.executor.execute(envelope, this.caller);
     if (result.ok) this.scheduleDrain();
     return result;
   }
   async initialize(): Promise<void> { await this.jobs(); await this.drain(); }
-  close(): void { this.closing = true; for (const controller of this.active.values()) if (!controller.signal.aborted) controller.abort(this.shutdownReason); this.listeners.clear(); }
-  async shutdown(): Promise<void> { this.close(); await Promise.allSettled([...this.drains, ...this.executions]); }
+  close(): void { this.closing = true; for (const controller of [...this.active.values(), ...this.mediaReads]) if (!controller.signal.aborted) controller.abort(this.shutdownReason); this.listeners.clear(); }
+  async shutdown(): Promise<void> {
+    this.close();
+    await Promise.allSettled([...this.drains, ...this.executions, ...this.imports.values()]);
+    await this.repository.read(this.projectId);
+  }
+  timelineTypes(input: unknown = {}) {
+    const parsed = timelineTypeQuerySchema.safeParse(input);
+    if (!parsed.success) throw new DomainError('INVALID_INPUT', '时间线查询条件无效');
+    return timelineRegistry.query(parsed.data);
+  }
   private scheduleDrain(): void {
     const drain = this.drain().catch(() => {}).finally(() => this.drains.delete(drain));
     this.drains.add(drain);
@@ -295,35 +336,76 @@ export class Workbench {
       this.registry.register(new WorkbenchHandler(type, schema, operation, permission, history));
     };
     add('project.title', z.strictObject({ title: z.string().trim().min(1).max(120) }), (document, { title }) => { document.title = title; return { title }; });
-    add('timeline.create', z.strictObject({ modelId: idSchema }), (document, { modelId }) => {
-      const plugin = modelRegistry.createPlugin(modelId);
-      const timeline = plugin.createTimeline({ id: randomUUID(), modelId, ticksPerSecond: 1000, settings: {} });
+    add('timeline.create', z.union([z.strictObject({ modelId: idSchema }), z.strictObject({ typeId: idSchema })]), (document, input) => {
+      const typeId = 'typeId' in input ? input.typeId : input.modelId;
+      const declaration = timelineRegistry.describe(typeId);
+      if ('modelId' in input && declaration.mode !== 'generated') throw new DomainError('INVALID_INPUT', '本地时间线通过类型标识创建，不声明生成模型');
+      const plugin = timelineRegistry.createPlugin(typeId);
+      const timeline = plugin.createTimeline({ id: randomUUID(), ...(declaration.modelId === undefined ? {} : { modelId: declaration.modelId }), ticksPerSecond: 1000, settings: {} });
       document.timelines[timeline.id] = timeline;
       return { timelineId: timeline.id };
     });
     add('timeline.settings', z.strictObject({ timelineId: idSchema, settings: jsonSchema }), (document, { timelineId, settings }) => {
-      const timeline = timelineOf(document, timelineId);
-      const validated = modelRegistry.createPlugin(timeline.modelId).validateSettings(settings);
-      if (canonical(timeline.settings) !== canonical(validated)) { timeline.settings = validated; timeline.itemIds.forEach(id => invalidate(document.items[id]!)); }
+      const timeline = timelineAction(document, timelineId, 'timeline.settings');
+      const validated = timelineRegistry.forTimeline(timeline).validateSettings(settings);
+      if (canonical(timeline.settings) !== canonical(validated)) {
+        // Capture legacy items before updating the defaults so their historical
+        // generation inputs keep the same effective settings and output.
+        for (const id of timeline.itemIds) {
+          const item = itemOf(document, id);
+          if (item.generationSettings === undefined) item.generationSettings = structuredClone(timeline.settings);
+        }
+        timeline.settings = validated;
+      }
       return { timelineId };
     });
+    add('timeline.defaults', z.strictObject({ timelineId: idSchema, itemDefaults: jsonSchema }), (document, { timelineId, itemDefaults }) => {
+      const timeline = timelineAction(document, timelineId, 'timeline.defaults');
+      timeline.itemDefaults = timelineRegistry.forTimeline(timeline).validateItemDefaults(itemDefaults);
+      return { timelineId };
+    });
+    add('timeline.refreshDefaults', z.strictObject({ timelineId: idSchema }), (document, { timelineId }) => {
+      const timeline = timelineAction(document, timelineId, 'timeline.refreshDefaults');
+      const plugin = timelineRegistry.forTimeline(timeline);
+      const defaults = plugin.resolveItemDefaults(timeline.itemDefaults ?? {});
+      const settings = plugin.validateSettings(timeline.settings);
+      const changedItemIds: string[] = [];
+      // All merges are validated before the transaction can commit. A plan-mode
+      // item therefore cannot be silently overwritten by incompatible defaults.
+      for (const id of timeline.itemIds) {
+        const item = itemOf(document, id);
+        const currentParams = plugin.validateItemParams(item.params);
+        const params = plugin.validateItemParams({ ...item.params, ...defaults });
+        const settingsChanged = canonical(plugin.validateSettings(item.generationSettings ?? timeline.settings)) !== canonical(settings);
+        if (canonical(currentParams) !== canonical(params) || settingsChanged) {
+          item.params = params;
+          item.generationSettings = structuredClone(settings);
+          invalidate(document, item);
+          changedItemIds.push(id);
+        }
+      }
+      return { timelineId, changedItemIds };
+    });
     add('timeline.delete', z.strictObject({ timelineId: idSchema }), (document, { timelineId }) => {
-      const timeline = timelineOf(document, timelineId);
+      const timeline = timelineAction(document, timelineId, 'timeline.delete');
       timeline.itemIds.forEach(id => { delete document.items[id]; });
       delete document.timelines[timelineId];
       return { timelineId };
     });
     const createItem = (document: ProjectDocument, input: { timelineId: string; startTick: number; durationTicks?: number | undefined; assetId?: string | undefined }): JsonObject => {
       const timeline = timelineOf(document, input.timelineId);
-      const descriptor = modelRegistry.resolve(timeline.modelId);
+      const plugin = timelineRegistry.forTimeline(timeline);
+      const descriptor = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
       const asset = input.assetId ? assetOf(document, input.assetId) : undefined;
-      if (asset && asset.kind !== descriptor.outputKind) throw new DomainError('NOT_APPLICABLE', '该时间线不能放置这种媒体；引用请拖入片段引用区域');
+      if (asset && !plugin.manifest.supportedActions.includes('item.create')) throw new DomainError('NOT_APPLICABLE', '该时间线不支持放置素材');
+      if (asset && (!descriptor.capabilities.mediaPlacement || asset.kind !== descriptor.outputKind)) throw new DomainError('NOT_APPLICABLE', '该时间线不能放置这种媒体');
+      if (!asset && !plugin.manifest.supportedActions.includes('item.createDraft')) throw new DomainError('NOT_APPLICABLE', '普通媒体时间线需要拖入真实素材');
       const assetDuration = asset?.metadata.durationMs;
       const defaultDuration = typeof assetDuration === 'number' && assetDuration > 0 ? Math.round(assetDuration * timeline.ticksPerSecond / 1000) : descriptor.modelId === 'music_v2_5' ? 30000 : 5000;
       const durationTicks = input.durationTicks ?? defaultDuration;
       placement(document, timeline.id, input.startTick, durationTicks);
-      const item = modelRegistry.createPlugin(timeline.modelId).createItem({ timeline, id: randomUUID(), startTick: input.startTick, durationTicks, params: {}, generationToken: randomUUID() });
-      if (asset) item.outputAssetId = asset.id;
+      const item = plugin.createItem({ timeline, id: randomUUID(), startTick: input.startTick, durationTicks, params: {}, generationToken: randomUUID() });
+      if (asset) { item.outputAssetId = asset.id; item.outputOrigin = 'placement'; }
       document.items[item.id] = item;
       timeline.itemIds.push(item.id);
       return { itemId: item.id };
@@ -332,36 +414,54 @@ export class Workbench {
     // preconditions and results, while sharing plugin validation and placement.
     add('item.createDraft', z.strictObject({ timelineId: idSchema, startTick: tickSchema }), createItem);
     add('item.create', z.strictObject({ timelineId: idSchema, startTick: tickSchema, durationTicks: durationSchema.optional(), assetId: idSchema }), createItem);
+    add('media.placeExternal', z.strictObject({ asset: assetSchema, timelineId: idSchema.optional(), startTick: tickSchema }), (document, input, caller) => {
+      if (caller.source !== 'internal') throw new DomainError('FORBIDDEN', '外部媒体必须先由宿主验证');
+      let timeline = input.timelineId === undefined ? undefined : timelineOf(document, input.timelineId);
+      if (timeline) {
+        const declaration = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
+        if (declaration.mode !== 'local' || !declaration.capabilities.mediaPlacement || declaration.outputKind !== input.asset.kind) throw new DomainError('NOT_APPLICABLE', '外部媒体只能放入同类的普通媒体时间线');
+      } else {
+        const plugin = timelineRegistry.createPlugin(`pixel.${input.asset.kind}.local`);
+        timeline = plugin.createTimeline({ id: randomUUID(), ticksPerSecond: 1000, settings: {} });
+        document.timelines[timeline.id] = timeline;
+      }
+      document.assets[input.asset.id] = input.asset;
+      const outcome = createItem(document, { timelineId: timeline.id, startTick: input.startTick, assetId: input.asset.id });
+      return { ...outcome, timelineId: timeline.id, assetId: input.asset.id, importFingerprint: input.asset.metadata.importFingerprint ?? null };
+    });
     this.registry.register(new MoveItemHandler((document, itemId, startTick) => {
       const current = document.items[itemId]!;
-      placement(structuredClone(document) as ProjectDocument, current.timelineId, startTick, current.durationTicks, itemId);
+      const draft = structuredClone(document) as ProjectDocument;
+      timelineAction(draft, current.timelineId, 'item.move');
+      placement(draft, current.timelineId, startTick, current.durationTicks, itemId);
     }));
     add('item.params', z.strictObject({ itemId: idSchema, params: jsonSchema }), (document, { itemId, params }) => {
       const item = itemOf(document, itemId);
-      const timeline = timelineOf(document, item.timelineId);
-      const validated = modelRegistry.createPlugin(timeline.modelId).validateItemParams(params);
-      if (canonical(item.params) !== canonical(validated)) { item.params = validated; invalidate(item); }
+      const timeline = timelineAction(document, item.timelineId, 'item.params');
+      const validated = timelineRegistry.forTimeline(timeline).validateItemParams(params);
+      if (canonical(item.params) !== canonical(validated)) { item.params = validated; invalidate(document, item); }
       return { itemId };
     });
     add('item.resize', z.strictObject({ itemId: idSchema, startTick: tickSchema, durationTicks: durationSchema }), (document, { itemId, startTick, durationTicks }) => {
       const item = itemOf(document, itemId);
+      timelineAction(document, item.timelineId, 'item.resize');
       placement(document, item.timelineId, startTick, durationTicks, itemId);
       item.startTick = startTick; item.durationTicks = durationTicks;
       return { itemId };
     });
     add('item.delete', z.strictObject({ itemId: idSchema }), (document, { itemId }) => {
       const item = itemOf(document, itemId);
-      const timeline = timelineOf(document, item.timelineId);
+      const timeline = timelineAction(document, item.timelineId, 'item.delete');
       timeline.itemIds = timeline.itemIds.filter(id => id !== itemId);
       delete document.items[itemId];
       return { itemId };
     });
     add('item.duplicate', z.strictObject({ itemId: idSchema }), (document, { itemId }) => {
       const original = itemOf(document, itemId);
-      const timeline = timelineOf(document, original.timelineId);
+      const timeline = timelineAction(document, original.timelineId, 'item.duplicate');
       const item = structuredClone(original);
       item.id = randomUUID(); item.generationToken = randomUUID(); item.startTick = original.startTick + original.durationTicks;
-      for (const other of timeline.itemIds.map(id => document.items[id]!).sort((left, right) => left.startTick - right.startTick)) {
+      for (const other of (timelineRegistry.forTimeline(timeline).manifest.overlapPolicy === 'allow' ? [] : timeline.itemIds.map(id => document.items[id]!).sort((left, right) => left.startTick - right.startTick))) {
         if (item.startTick < other.startTick + other.durationTicks && other.startTick < item.startTick + item.durationTicks) item.startTick = other.startTick + other.durationTicks;
       }
       placement(document, item.timelineId, item.startTick, item.durationTicks);
@@ -371,18 +471,21 @@ export class Workbench {
     add('item.reference.add', z.strictObject({ itemId: idSchema, assetId: idSchema }), (document, { itemId, assetId }) => {
       const item = itemOf(document, itemId);
       const asset = assetOf(document, assetId);
-      const descriptor = modelRegistry.resolve(timelineOf(document, item.timelineId).modelId);
+      const timeline = timelineAction(document, item.timelineId, 'item.reference.add');
+      const descriptor = timelineRegistry.describe(timeline.modelId ?? timeline.pluginId);
+      if (!descriptor.capabilities.references) throw new DomainError('NOT_APPLICABLE', '该时间线不支持素材引用');
       if (!descriptor.referenceKinds.includes(asset.kind)) throw new DomainError('NOT_APPLICABLE', '该模型不支持这种引用媒体');
       if (item.referenceAssetIds.includes(assetId)) throw new DomainError('NOT_APPLICABLE', '引用已存在');
-      const maximum = item.params.referenceMode === 'firstFrame' ? 1 : descriptor.maxReferences;
+      const maximum = referenceLimit(descriptor, item.params);
       if (item.referenceAssetIds.length >= maximum) throw new DomainError('NOT_APPLICABLE', '该模型的引用数量已达到上限');
-      item.referenceAssetIds.push(assetId); invalidate(item);
+      item.referenceAssetIds.push(assetId); invalidate(document, item);
       return { itemId, assetId };
     });
     add('item.reference.remove', z.strictObject({ itemId: idSchema, assetId: idSchema }), (document, { itemId, assetId }) => {
       const item = itemOf(document, itemId);
+      timelineAction(document, item.timelineId, 'item.reference.remove');
       if (!item.referenceAssetIds.includes(assetId)) throw new DomainError('NOT_FOUND', '引用不存在');
-      item.referenceAssetIds = item.referenceAssetIds.filter(id => id !== assetId); invalidate(item);
+      item.referenceAssetIds = item.referenceAssetIds.filter(id => id !== assetId); invalidate(document, item);
       return { itemId, assetId };
     });
     add('asset.import', z.strictObject({ asset: assetSchema }), (document, { asset }, caller) => {
@@ -397,6 +500,7 @@ export class Workbench {
     });
     add('asset.saveFromItem', z.strictObject({ itemId: idSchema }), (document, { itemId }) => {
       const item = itemOf(document, itemId);
+      timelineAction(document, item.timelineId, 'asset.saveFromItem');
       if (!item.outputAssetId) throw new DomainError('NOT_APPLICABLE', '该片段还没有可保存的媒体输出');
       const asset = assetOf(document, item.outputAssetId);
       asset.metadata.librarySaved = true;
@@ -404,11 +508,13 @@ export class Workbench {
     });
     add('generation.submit', z.strictObject({ itemId: idSchema }), (document, { itemId }) => {
       const item = itemOf(document, itemId);
-      const descriptor = modelRegistry.resolve(timelineOf(document, item.timelineId).modelId);
+      const timeline = timelineAction(document, item.timelineId, 'generation.submit');
+      if (timeline.modelId === undefined) throw new DomainError('NOT_APPLICABLE', '本地时间线不会启动模型生成');
+      const descriptor = modelRegistry.resolve(timeline.modelId);
       if (!this.runner || !this.providers[descriptor.providerId]) throw new DomainError('NOT_APPLICABLE', '该供应商尚未配置后端凭证');
       if ([...this.jobsCache.values()].some(job => job.request.targetItemId === itemId && ['queued', 'running', 'cancelRequested'].includes(job.state))) throw new DomainError('NOT_APPLICABLE', '该片段正在生成');
       item.generationToken = randomUUID();
-      const request = captureRequest(document, item);
+      const request = captureGenerationRequest(document, item);
       const jobId = randomUUID();
       const command: OutboxEntry = { id: randomUUID(), operation: 'start', jobId, itemId, request, done: false };
       return { jobId, itemId, generationCommand: command as unknown as JsonObject };
@@ -431,27 +537,45 @@ export class Workbench {
     add('generation.apply', z.strictObject({ jobId: z.uuid(), itemId: idSchema, generationToken: idSchema, inputFingerprint: idSchema, asset: assetSchema }), (document, input, caller) => {
       if (caller.source !== 'internal') throw new DomainError('FORBIDDEN', '生成结果只由宿主挂载');
       const item = itemOf(document, input.itemId);
-      if (item.generationToken !== input.generationToken || captureRequest(document, item).inputFingerprint !== input.inputFingerprint) throw new DomainError('STALE_RESULT', '片段已变更，保留产物但不覆盖当前输入');
-      if (input.asset.kind !== modelRegistry.resolve(timelineOf(document, item.timelineId).modelId).outputKind) throw new DomainError('INVALID_INPUT', '生成产物类型与时间线模型不一致');
+      if (item.generationToken !== input.generationToken || captureGenerationRequest(document, item).inputFingerprint !== input.inputFingerprint) throw new DomainError('STALE_RESULT', '片段已变更，保留产物但不覆盖当前输入');
+      const timeline = timelineOf(document, item.timelineId);
+      if (timeline.modelId === undefined || input.asset.kind !== modelRegistry.resolve(timeline.modelId).outputKind) throw new DomainError('INVALID_INPUT', '生成产物类型与时间线模型不一致');
       document.assets[input.asset.id] = input.asset;
       item.outputAssetId = input.asset.id;
+      item.outputOrigin = 'generated';
       return { itemId: item.id, assetId: input.asset.id, jobId: input.jobId };
     }, 'generation.apply');
   }
 
-  async importMedia(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number }): Promise<ActionResult> {
-    const fingerprint = createHash('sha256').update(canonical({ mimeType: input.mimeType, name: input.name, expectedRevision: input.expectedRevision })).update(input.bytes).digest('hex');
+  importMedia(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number }): Promise<ActionResult> {
+    return this.verifiedMediaTransaction(input, 'asset.import', {});
+  }
+  placeExternalMedia(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number; startTick: number; timelineId?: string }): Promise<ActionResult> {
+    return this.verifiedMediaTransaction(input, 'media.placeExternal', { startTick: input.startTick, ...(input.timelineId === undefined ? {} : { timelineId: input.timelineId }) });
+  }
+  private async verifiedMediaTransaction(input: { bytes: Uint8Array; mimeType: string; name: string; requestId: string; expectedRevision: number }, actionType: 'asset.import' | 'media.placeExternal', destination: JsonObject): Promise<ActionResult> {
+    if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
+    const fingerprint = createHash('sha256').update(canonical({ mimeType: input.mimeType, name: input.name, expectedRevision: input.expectedRevision, ...(actionType === 'asset.import' ? {} : { actionType, destination }) })).update(input.bytes).digest('hex');
     const previous = this.imports.get(input.requestId);
-    if (previous) { await previous; return this.importMedia(input); }
+    if (previous) { await previous; return this.verifiedMediaTransaction(input, actionType, destination); }
     const operation = (async (): Promise<ActionResult> => {
       const replay = await this.repository.receipt(this.caller.actorId, input.requestId);
       if (replay) return replay.outcome.importFingerprint === fingerprint ? replay : { ok: false, requestId: input.requestId, error: { code: 'REQUEST_ID_REUSED', message: '相同请求 ID 不能导入不同内容' } };
       const snapshot = await this.snapshot();
+      if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
       if (snapshot.revision !== input.expectedRevision) return { ok: false, requestId: input.requestId, error: { code: 'REVISION_CONFLICT', message: '项目已更新，请重新读取后重试' } };
       const kind = detectMedia(input.bytes, input.mimeType);
-      const artifact = await this.artifacts.write({ attemptToken: { jobId: `import_${randomUUID()}`, attempt: 1 }, bytes: input.bytes, kind, metadata: { mimeType: input.mimeType, name: input.name.slice(0, 200), imported: true, librarySaved: true, importFingerprint: fingerprint } });
+      let durationMs: number | undefined;
+      // 库导入与直接放置共享同一个可信探测入口，后续 item.create 不猜测源媒体时长。
+      if (kind !== 'image') {
+        const controller = new AbortController(); this.mediaReads.add(controller);
+        try { durationMs = await probeMediaDuration(input.bytes, kind, input.mimeType, controller.signal); }
+        finally { this.mediaReads.delete(controller); }
+      }
+      const artifact = await this.artifacts.write({ attemptToken: { jobId: `import_${randomUUID()}`, attempt: 1 }, bytes: input.bytes, kind, metadata: { mimeType: input.mimeType, name: input.name.slice(0, 200), imported: true, librarySaved: true, importFingerprint: fingerprint, ...(durationMs === undefined ? {} : { durationMs }) } });
+      if (this.closing) return { ok: false, requestId: input.requestId, error: { code: 'NOT_APPLICABLE', message: '项目会话已关闭，请在当前作品中重试' } };
       const caller: CallerContext = { actorId: this.caller.actorId, source: 'internal', projectIds: this.caller.projectIds, permissions: new Set(['project.edit']) };
-      return this.executor.execute({ requestId: input.requestId, expectedRevision: input.expectedRevision, projectId: this.projectId, type: 'asset.import', payload: { asset: artifact.asset } }, caller);
+      return this.executor.execute({ requestId: input.requestId, expectedRevision: input.expectedRevision, projectId: this.projectId, type: actionType, payload: { asset: artifact.asset, ...destination } }, caller);
     })();
     this.imports.set(input.requestId, operation);
     try { return await operation; }

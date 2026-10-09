@@ -13,6 +13,7 @@ export class DesktopWindowHost {
     if (!Object.hasOwn(dimensions, role)) throw new Error('Unknown desktop window role');
     this.role = role;
     this.projectId = projectId;
+    this.baseUrl = baseUrl;
     this.parent = parent;
     this.window = new BrowserWindow({
       ...dimensions[role], frame: false, show: false, backgroundColor: '#f8f9f5',
@@ -28,7 +29,7 @@ export class DesktopWindowHost {
     this.window.webContents.on('will-navigate', (event, url) => {
       try {
         const target = new URL(url);
-        if (target.origin !== new URL(baseUrl).origin || target.pathname !== '/') event.preventDefault();
+        if (target.origin !== new URL(this.baseUrl).origin || target.pathname !== '/') event.preventDefault();
       } catch { event.preventDefault(); }
     });
     for (const name of ['maximize', 'unmaximize']) this.window.on(name, () => {

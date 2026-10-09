@@ -25,6 +25,13 @@ test('cross-window object leases verify real peers and project objects before is
   broker.clear();
 });
 
+test('external media hints never issue cross-window object tokens or replace an active object lease', () => {
+  const { broker, source, project } = setup();
+  const token = broker.begin(2, source, 0)!;
+  assert.equal(broker.begin(1, { role: 'external.media', payload: { object: { kind: 'project', projectId: project.document.id }, kind: 'image' } }, 0), undefined);
+  assert.ok(broker.finish(1, token));
+});
+
 test('hover reads do not consume a cross-window lease; a drop consumes it once', () => {
   const { broker, source, notifications } = setup();
   const token = broker.begin(2, source, 0)!;
@@ -79,4 +86,26 @@ test('source dragend has bounded drop grace; superseding drags and cancellation 
   const third = broker.begin(2, source, 0)!;
   assert.equal(broker.resolve(1, second), undefined);
   assert.ok(broker.finish(1, third));
+});
+
+test('only the authenticated source can explicitly cancel, and cancellation has no drop grace', () => {
+  const { broker, source, notifications } = setup();
+  const token = broker.begin(2, source, 0)!;
+  broker.end(1, token, true);
+  assert.ok(broker.resolve(1, token));
+  broker.end(2, 'forged', true);
+  assert.ok(broker.resolve(1, token));
+  broker.end(2, token, true);
+  assert.equal(broker.finish(1, token), undefined);
+  assert.equal(broker.activeFor(2), undefined);
+  assert.equal(notifications.at(-1), undefined);
+});
+
+test('an explicit source cancellation also revokes a drag already waiting in dragend grace', () => {
+  const { broker, source } = setup();
+  const token = broker.begin(2, source, 0)!;
+  broker.end(2, token);
+  assert.ok(broker.resolve(1, token));
+  broker.end(2, token, true);
+  assert.equal(broker.finish(1, token), undefined);
 });

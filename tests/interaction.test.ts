@@ -3,7 +3,8 @@ import test from 'node:test';
 import type { DeepReadonly, ProjectSnapshot } from '../src/contracts.js';
 import type { ContextActionContext, DragContext } from '../src/frontend.js';
 import { modelRegistry } from '../src/models.js';
-import { createInteractionHost } from '../web/interaction.js';
+import { timelineRegistry } from '../src/timeline-catalog.js';
+import { createInteractionHost, declarationForTimeline } from '../web/interaction.js';
 
 function referenceProject(modelId = 'alibaba/wan-3.0', referenceMode = 'reference'): ProjectSnapshot {
   const plugin = modelRegistry.createPlugin(modelId);
@@ -39,7 +40,7 @@ function referenceDrop(project: ProjectSnapshot, assetId = 'image', scopeId?: st
 }
 
 function interaction() {
-  return createInteractionHost('project', () => modelRegistry.query({ limit: 5 }).items, () => []);
+  return createInteractionHost('project', () => timelineRegistry.query({ limit: 20 }).items, () => []);
 }
 
 test('Wan first-frame reference drag obeys the single-image limit before submitting an Action', () => {
@@ -66,7 +67,7 @@ test('reference applicability rejects audio models, incompatible media and repea
   const host = interaction();
   for (const modelId of ['eleven_v4', 'eleven_text_to_sound_v2', 'music_v2_5']) {
     const context = referenceDrop(referenceProject(modelId));
-    assert.deepEqual(host.drag.hover(context), { status: 'disabled', reason: '该模型不支持这种参考素材' });
+    assert.deepEqual(host.drag.hover(context), { status: 'disabled', reason: '该时间线不支持这种参考素材' });
     assert.equal(host.drag.drop(context), undefined);
   }
   const project = referenceProject('x-ai/grok-imagine-image-2.0');
@@ -168,4 +169,62 @@ test('native draft creation rejects background and former detail scopes', () => 
   assert.equal(host.menu.commandFor('item.createDraft', scoped)?.type, 'item.createDraft');
   host.navigator.reset();
   assert.equal(host.menu.commandFor('item.createDraft', context)?.type, 'item.createDraft');
+});
+
+test('local text uses the same creation/edit relationships and does not acquire generation or media actions',()=>{
+  const host=interaction();const project=referenceProject();
+  const plugin=timelineRegistry.createPlugin('pixel.text');
+  const timeline=plugin.createTimeline({id:'text',ticksPerSecond:1000,settings:{}});
+  const item=plugin.createItem({timeline,id:'note',startTick:0,durationTicks:5000,params:{text:'镜头参考'},generationToken:'text:1'});
+  timeline.itemIds.push(item.id);project.document.timelines[timeline.id]=timeline;project.document.items[item.id]=item;
+  const context:ContextActionContext={project,target:{kind:'item',projectId:'project',id:item.id}};
+  assert.deepEqual(host.menu.list(context).map(action=>action.id),['item.duplicate','item.delete']);
+  const position:ContextActionContext={project,target:{kind:'timeline',projectId:'project',id:timeline.id},data:{role:'timeline.position',startTick:1500}};
+  assert.equal(host.menu.commandFor('item.createDraft',position)?.type,'item.createDraft');
+  assert.equal(host.menu.commandFor('timeline.refreshDefaults',{...position,data:{}}),undefined);
+  assert.equal(host.drag.drop({project,source:{role:'asset',payload:{object:{kind:'asset',projectId:'project',id:'image'}}},target:{role:'timeline.position',object:position.target,data:{startTick:0}}}),undefined);
+  assert.equal(host.drag.drop({project,source:{role:'item',payload:{object:{kind:'item',projectId:'project',id:item.id}}},target:{role:'asset-library',object:{kind:'project',projectId:'project'},data:{}}}),undefined);
+});
+
+test('disk media import and placement use one registry, enforce local type and detail scope, and carry no File or path',()=>{
+  const host=interaction();const project=referenceProject();
+  const source:DragContext['source']={role:'external.media',payload:{object:{kind:'project',projectId:'project'},kind:'image'}};
+  const blank:DragContext={project,source,target:{role:'timeline.position',object:{kind:'project',projectId:'project'},data:{startTick:0}}};
+  assert.deepEqual(host.drag.drop(blank),{type:'media.placeExternal',payload:{startTick:0}});
+  assert.equal(host.paths.getPath('media.placeExternal'),'drag:external.media->timeline.position');
+  const library:DragContext={...blank,target:{role:'asset-library',object:{kind:'project',projectId:'project'},data:{}}};
+  assert.deepEqual(host.drag.drop(library),{type:'asset.import',payload:{}});
+  assert.equal(host.paths.getPath('asset.import'),'drag:external.media->asset-library');
+  const plugin=timelineRegistry.createPlugin('pixel.image.local');
+  const local=plugin.createTimeline({id:'local',ticksPerSecond:1000,settings:{}});project.document.timelines.local=local;
+  const placement:DragContext={...blank,target:{role:'timeline.position',object:{kind:'timeline',projectId:'project',id:'local'},data:{startTick:5000}}};
+  assert.deepEqual(host.drag.drop(placement),{type:'media.placeExternal',payload:{timelineId:'local',startTick:5000}});
+  assert.equal(host.drag.drop({...placement,source:{role:'external.media',payload:{object:{kind:'project',projectId:'project'},kind:'audio'}}}),undefined);
+  assert.equal(host.drag.drop({...placement,target:{...placement.target,object:{kind:'timeline',projectId:'project',id:'timeline'}}}),undefined);
+  assert.equal(host.drag.drop({...blank,target:{...blank.target,data:{startTick:-1}}}),undefined);
+  assert.equal(host.drag.drop({...library,source:{role:'external.media',payload:{object:{kind:'project',projectId:'foreign'},kind:'image'}}}),undefined);
+  host.navigator.open({kind:'item',projectId:'project',id:'item'});
+  assert.equal(host.drag.hover(blank).status,'hidden');assert.equal(host.drag.drop(library),undefined);
+});
+
+test('edge resizing accepts only its own item and a safe positive tick interval',()=>{
+  const host=interaction();const project=referenceProject();
+  project.document.items.other={...structuredClone(project.document.items.item!),id:'other'};
+  const context:DragContext={project,source:{role:'item.duration',payload:{object:{kind:'item',projectId:'project',id:'item'},edge:'end'}},target:{role:'item.edge',object:{kind:'item',projectId:'project',id:'item'},data:{startTick:0,durationTicks:6000}}};
+  assert.equal(host.drag.drop(context)?.type,'item.resize');
+  assert.equal(host.drag.drop({...context,target:{...context.target,object:{kind:'item',projectId:'project',id:'other'}}}),undefined);
+  for(const data of [{startTick:-1,durationTicks:6000},{startTick:0,durationTicks:0},{startTick:0.5,durationTicks:6000},{startTick:Number.MAX_SAFE_INTEGER,durationTicks:6000}])assert.equal(host.drag.drop({...context,target:{...context.target,data}}),undefined);
+});
+
+test('valid persisted model aliases resolve catalog fields without rewriting project data',()=>{
+  const project=referenceProject('eleven_text_to_sound_v2');
+  const timeline=project.document.timelines.timeline!;
+  timeline.modelId='eleven_text_sound_v2';
+  const unchanged=structuredClone(project);
+  const declaration=declarationForTimeline(timelineRegistry.query({limit:20}).items,timeline);
+  assert.equal(declaration?.modelId,'eleven_text_to_sound_v2');
+  assert.equal(declaration?.capabilities.generation,true);
+  assert.equal(declaration?.fields.some(field=>field.key==='text'),true);
+  assert.equal(interaction().menu.commandFor('generation.submit',{project,target:{kind:'item',projectId:'project',id:'item'}})?.type,'generation.submit');
+  assert.deepEqual(project,unchanged);
 });

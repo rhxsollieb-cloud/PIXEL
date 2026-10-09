@@ -1,6 +1,6 @@
 # Pixel 模型接入与执行边界
 
-更新日期：2026-10-08。产品与交互规则沿用[设计哲学](design-philosophy.zh-CN.md)；项目、Action 与任务的完整边界见[核心架构](core-architecture.zh-CN.md)。
+更新日期：2026-10-09。产品与交互规则沿用[设计哲学](design-philosophy.zh-CN.md)；项目、Action 与任务的完整边界见[核心架构](core-architecture.zh-CN.md)。
 
 当前已实现后端的官方 SDK 适配器、共享模型语义目录、文件任务 ledger、媒体产物存储和诊断 CLI；Electron / React 工作台及 `generation.submit` 的项目事务/outbox、内部 `generation.applyResult` 的受控挂载也已由 `src/workbench.ts` 组合完成。验证使用真实 SDK 配合模拟 HTTP 响应，未发起付费生成请求。正式项目 CLI / Agent 和共享 Action 能力查询仍待接线；诊断 CLI 生成文件成功不代表 GUI 项目已关联输出。
 
@@ -8,7 +8,7 @@
 
 | 用户指定模型 | 持久化及 API 的 canonical modelId | SDK / 接口 | outputKind / Item 语义 |
 | --- | --- | --- | --- |
-| `eleven_v4` | `eleven_v4` | `@elevenlabs/elevenlabs-js`，`textToSpeech.convert` | `audio` / `audio.speech` |
+| `eleven_v4` | `eleven_v4` | `@elevenlabs/elevenlabs-js`，`textToDialogue.convertWithTimestamps`；关闭裁尾时 `convert` | `audio` / `audio.speech` |
 | `eleven_text_sound_v2` | `eleven_text_to_sound_v2` | 同上，`textToSoundEffects.convert` | `audio` / `audio.soundEffect` |
 | `music_v2_5` | `music_v2_5` | 同上，`music.compose` | `audio` / `audio.music` |
 | Alibaba: Wan 3.0 | `alibaba/wan-3.0` | `@openrouter/sdk`，`videoGeneration.generate` / `getGeneration` / `getVideoContent` | `video` / `video.generated` |
@@ -24,17 +24,23 @@ Wan 与 Grok 使用用户指定的版本，不在失败时自动换成相邻模�
 
 `ModelTimelinePlugin` 复用 `BaseTimelinePlugin`，各模型拥有自己的 Item kind 与字段。草稿可以先保留空文本，生成前必须通过可执行 schema。未知字段、错误单位、互斥参数和不支持的引用都会在调用 SDK 之前被拒绝。schema 的默认值在后端一次规范化，保存到请求快照，执行中不再读取对象的新参数。
 
+1.5 将内容目录与生成模型目录分开：`TimelineRegistry` 包含四种本地插件并组合 `ModelRegistry`，本地轨没有模型 ID 或 SDK 调用。模型 descriptor 声明 `referenceTextFields`、必需文本字段、引用条件限额和跨字段生成 schema；GUI 与后端消费共同规则，不从模型名称猜测 `prompt`、`text` 或引用上限。新增模型及窗口的具体接线步骤见[本地时间线与扩展边界](local-timelines-and-extension.zh-CN.md)。
+
 生产初始项目不预置模型、Item 或示例提示词。Timeline 工作区空白处右键 → 新建时间线 → 选择模型仅创建空 Timeline。已有 Timeline 时间位置右键 → 新建生成草稿，经 `item.createDraft` 显式创建无输出的 Item；Asset → Timeline 时间位置则经带 `assetId` 的 `item.create` 放置已有素材。参数字段随后通过对象详情披露。模型 schema 默认值是已明确创建对象的规范化，不是自动向项目填入示例内容；创建模型本身不会附送草稿。
 
 | 模型 | `params` 中的主要字段 | `settings` | 生成时长含义 |
 | --- | --- | --- | --- |
-| Eleven v4 | `text`、`voiceId`、`voiceSettings`、`languageCode`、nullable `seed`、`outputFormat` | 严格 `{}` | 由文本与语音决定，不接受固定 `durationMs` |
+| Eleven v4 | `text`、`voiceId`、`voiceSettings`、`languageCode`、nullable `seed`、`outputFormat`、`contextMode`、`previousText` / `nextText`、`trimTail`、`tailPaddingMs` / `tailFadeMs` | 严格 `{}` | 由文本与语音决定，不接受固定 `durationMs` |
 | Sound Effects v2 | `text`、nullable `durationSeconds`、`promptInfluence`、`loop`、`outputFormat` | 严格 `{}` | 自动选择，或 0.5–30 秒 |
 | Music v2.5 | `prompt` 或 `compositionPlan`、nullable `musicLengthMs`、`forceInstrumental`、nullable `seed`、`finetuneId`、`outputFormat` | 严格 `{}` | prompt 模式自动选择或 3000–600000 毫秒；计划模式为 chunks 总时长 |
 | Wan 3.0 | `prompt`、`durationSeconds`、`generateAudio`、nullable `seed`、`referenceMode` | `resolution`、`aspectRatio` | 2–30 整秒，默认 5 秒 |
 | Grok Imagine Image 2.0 | `prompt` | `resolution`、`quality`、`aspectRatio` | 静态图像，不接受 `durationMs` |
 
-Eleven v4 生成前必须指定真实 `voiceId`，代码不编造默认音色。文本最多 10000 字符；本模型的 `voiceSettings` 只公开 `stability` 与 `similarityBoost`，nullable 对象表示使用该声音的已有设置。v4 不支持的 `speed`、`style` 等字段会被拒绝。[语音 API](https://elevenlabs.io/docs/api-reference/text-to-speech/convert)、[ElevenLabs 官方 v4 voice settings 说明](https://github.com/elevenlabs/skills/blob/main/text-to-speech/references/voice-settings.md)。
+Eleven v4 生成前必须指定真实 `voiceId`，代码不编造默认音色。正文最多 10000 字符；官方 Dialogue 文档建议每次正文不超过 2000 字符以保证可靠性，长文应由用户拆成片段，后端不擅自截断正文或拆成多个收费请求。v4 使用 Text to Dialogue，而非此前适配器使用的 Text to Speech：单个 Item 映射成 `inputs: [{ text, voiceId }]`，保留 languageCode 与 seed。本模型的 `voiceSettings` 公开 `stability` 与 `similarityBoost`，SDK 边界把后者映射为 Dialogue 的 `settings.similarity`；nullable 对象表示采用已有声音设置。`speed`、`style` 等不支持字段仍拒绝。[ElevenLabs 模型目录](https://elevenlabs.io/docs/overview/models)、[Dialogue API](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps)。
+
+`contextMode` 为 neighbors / manual / none，默认 neighbors。工作台提交时按同一 Timeline 的时间顺序捕获相邻同音色文本，各取前段末尾及后段开头最多 100 个 Unicode 字符；音色改变形成连续性边界。manual 使用 Item 的 previousText / nextText，各最多 100 字符；none 不发送上下文。SDK 分别映射为 previousText 与 futureText，正文只包含当前片段。捕获 context 进入请求快照与输入指纹，不能在执行中重新读取邻居。[官方上下文参数](https://elevenlabs.io/docs/api-reference/text-to-dialogue/convert-with-timestamps)。
+
+`trimTail` 默认 true，tailPaddingMs 默认 40（0–500），tailFadeMs 默认 5（0–50）。开启时采用 `convertWithTimestamps`，以当前正文最后有效发音字符的时间戳确定边界，余量不越过额外发音起点；音频后处理器实际解码为 PCM、按样本裁切并在正文之后的余量内淡出，再编码为含延迟/填充信息的 MP3。缺失、错配或越界时间戳会明确失败，不能猜测裁掉固定毫秒数或破坏 MP3 字节。关闭裁尾时采用 Dialogue 的普通音频接口。此能力减少已知的尾部多余发音，不能代替真实供应商生成质量验证。实现与验证详见[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)。
 
 音频 `outputFormat` 只有一个入口，放在 Item 的 `params`。当前公开 MP3 输出，语音及音效默认 `mp3_44100_128`，音乐默认 `mp3_48000_192`。音效的 `promptInfluence` 默认 0.3，`loop` 默认 false。[音效 API](https://elevenlabs.io/docs/api-reference/text-to-sound-effects/convert)。
 
@@ -42,7 +48,7 @@ Eleven v4 生成前必须指定真实 `voiceId`，代码不编造默认音色。
 
 Wan 公开 480p / 720p / 1080p，支持当前目录声明的五种宽高比；Grok 公开 1K / 2K、low / medium 质量及模型声明的宽高比，当前每次产生一张图。[Wan 模型页](https://openrouter.ai/alibaba/wan-3.0)、[Grok 模型页](https://openrouter.ai/x-ai/grok-imagine-image-2.0)。图像不继承视频的帧率、时长、负向提示词或 seed 参数。
 
-`GenerationRequest.settings` 捕获 Timeline 设置；`durationMs` 表达模型生成时长，不能自动等同于 Item 在作品中的播放区间。SFX / music prompt 未设时长但提供 `durationMs` 时，将其规范成该模型的秒 / 毫秒参数；同时提供的两种表示必须一致。自然语音时长与静态图像保持独立语义。`PluginFieldDeclaration` 的 `object` / `array`、`children`、`visibleWhen` 与 `nullable` 让宿主逐层显示复杂字段，不要求插件自行增加界面。
+`GenerationRequest.settings` 捕获 Item 的生成设置快照（旧 Item 回退其 Timeline 设置）；`durationMs` 表达模型生成时长，不能自动等同于 Item 在作品中的播放区间。SFX / music prompt 未设时长但提供 `durationMs` 时，将其规范成该模型的秒 / 毫秒参数；同时提供的两种表示必须一致。自然语音时长与静态图像保持独立语义。`PluginFieldDeclaration` 的 `object` / `array`、`children`、`visibleWhen` 与 `nullable` 让宿主逐层显示复杂字段，不要求插件自行增加界面。
 
 ## 3. 引用、异步任务与恢复
 
@@ -100,8 +106,8 @@ npm run generate -- --resume JOB_ID
 
 ## 5. 设计哲学评审与当前证据
 
-对应设计哲学第 10 节，模型能力作用于参数、Item 生成请求、任务与产物；标准 GUI 路径为 Timeline 工作区空白处右键 → 新建时间线 → 选择模型、已有 Timeline 时间位置右键 → 新建生成草稿、Item 双击编辑、Item 右键生成。已有素材另由 Asset → Timeline 放置。默认只显示 Viewer + Timeline；素材库唯一入口改为主 Viewer 右键 → 素材库，空预览及已有输出均可。它是用户要求的 P03 局部导航例外，不提交业务 Action，项目详情旧入口移除；库 Asset → 主 Timeline 放置或 Item 引用区、主 Item → 库复用均通过真实跨窗口会话和既有 Action；对象详情仅隔离所属工作窗口。新增字段仅扩展语义，由宿主决定控件和导航，不增加模型拖拽、常驻按钮或插件 Modal。本轮理解与偏移修正见[哲学对齐记录](philosophy-alignment.zh-CN.md)，本轮窗口关系已通过类型检查、96 项核心测试、12 项浏览器交互测试及原生桌面验证，不涉及模型业务修改或付费生成。
+对应设计哲学第 10 节，模型能力作用于 Timeline 默认配置、Item 生成请求、任务与产物。标准 GUI 路径为 Timeline 左侧单击配置、左侧右键刷新默认配置、工作区空白处右键创建模型时间线、已有时间位置右键创建生成草稿、Item 双击编辑与右键生成。已有素材经 Asset → Timeline 放置。默认仍只显示 Viewer + Timeline，素材库唯一入口仍为主 Viewer 右键；并行窗口及局部详情隔离保持 1.3 语义。新增字段只扩展语义，由宿主决定控件和导航，无模型拖拽、常驻按钮或插件 Modal。旧片段保留原值、设置快照和明确刷新规则，连同本轮评审，见[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)；此前窗口纠偏证据作为历史保留在[哲学对齐记录](philosophy-alignment.zh-CN.md)。
 
-`ModelRegistry` 与 `BaseModelProvider` 集中校验，正式项目 CLI / Agent 接线时也应复用，避免各自复制供应商规则。项目权威状态边界不变，任务 ledger 与产物存储独立于编辑历史，runner 不直接写项目。attempt、保存远端 ID 与总超时保护中断执行；工作台已在 `generation.applyResult` 事务内执行旧结果、请求输入及产物归属检查。像素界面与导航修正保持共享 Action 和宿主交互边界；当前基线及调整依据以设计哲学 1.3 为准。素材库入口和窗口关系调整不涉及模型请求、付费生成或项目数据迁移。
+`ModelRegistry` 与 `BaseModelProvider` 集中校验，正式项目 CLI / Agent 接线时也应复用，避免各自复制供应商规则。项目权威状态边界不变，任务 ledger 与产物存储独立于编辑历史，runner 不直接写项目。attempt、保存远端 ID 与总超时保护中断执行；工作台已在 `generation.applyResult` 事务内执行旧结果、含 context 的请求指纹及产物归属检查。音频后处理组合到现有 provider 流程，继承同一取消与总超时。当前基线及调整依据以设计哲学 1.4 为准；旧 Item 缺失的设置快照惰性兼容，无需清空项目，没有发起付费生成。
 
 相关自动验证覆盖 schema 默认值与未知字段、模型别名、图像 / 音频 / 视频参数隔离、真实 SDK 编码、禁用自动重试、checkpoint 顺序与远端恢复、引用限制、取消、超时、异常产物和脱敏错误。测试使用模拟响应，不能证明账户权限、余额或供应商实际生成质量；付费端到端验证按明确请求另行执行。

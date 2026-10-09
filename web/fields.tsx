@@ -12,6 +12,7 @@ const labels: Record<string,string> = {
   compositionPlan:'分段创作计划',chunks:'音乐段落',musicLengthMs:'音乐时长 / 毫秒',
   forceInstrumental:'纯器乐',finetuneId:'音乐微调版本',durationMs:'段落时长 / 毫秒',
   positiveStyles:'期望的音乐风格',negativeStyles:'排除的音乐风格',contextAdherence:'上下文贴合程度',
+  contextMode:'文本上下文',previousText:'前文参考',nextText:'后文参考',trimTail:'裁剪尾部',tailPaddingMs:'尾部余量 / 毫秒',tailFadeMs:'尾部淡出 / 毫秒',
 };
 export function fieldLabel(field: PluginFieldDeclaration): string { return labels[field.key] ?? field.label; }
 export function atPath(value: unknown, path: FieldPath): JsonValue | undefined {
@@ -93,10 +94,10 @@ export function FieldEditor({field,value,schema,disabled = false,onCommit,onOpen
   if(field.valueType === 'object' || (field.valueType === 'array' && field.children)) {
     const count = Array.isArray(value) ? value.length : value && typeof value === 'object' ? Object.keys(value).length : 0;
     return <PixelField label={fieldLabel(field)}>
-      {field.nullable && <PixelSelect aria-label={`${fieldLabel(field)}模式`} disabled={disabled} value={value === null ? 'default':'custom'} onChange={event=>{void onCommit(event.target.value === 'default' ? null : defaultFromSchema(schema,true));}}>
+      {field.nullable && <PixelSelect aria-label={`${fieldLabel(field)}模式`} disabled={disabled} value={value == null ? 'default':'custom'} onChange={event=>{void onCommit(event.target.value === 'default' ? null : defaultFromSchema(schema,true));}}>
         <option value="default">模型默认</option><option value="custom">自定义</option>
       </PixelSelect>}
-      {value !== null && <div className="field-object" tabIndex={0} role="group" aria-label={`进入${fieldLabel(field)}`} onDoubleClick={onOpen} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();onOpen();}}}>
+      {value != null && <div className="field-object" tabIndex={0} role="group" aria-label={`进入${fieldLabel(field)}`} onDoubleClick={onOpen} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();onOpen();}}}>
         <span><PixelIcon name="folder"/> {fieldLabel(field)}</span><span>{count} 项 <PixelIcon name="chevron-right"/></span>
       </div>}
     </PixelField>;
@@ -108,10 +109,10 @@ export function FieldEditor({field,value,schema,disabled = false,onCommit,onOpen
   </PixelField>;
   if(field.valueType === 'enum') return <PixelField label={fieldLabel(field)}>
     <PixelSelect aria-label={fieldLabel(field)} disabled={disabled} value={String(value ?? '')} onChange={event=>{void onCommit(event.target.value);}}>
-      {field.options?.map(option=><option key={option.value} value={option.value}>{({reference:'图片参考',firstFrame:'首帧',low:'低',medium:'中',high:'高',auto:'自动'} as Record<string,string>)[option.value] ?? option.label}</option>)}
+      {field.options?.map(option=><option key={option.value} value={option.value}>{({reference:'图片参考',firstFrame:'首帧',low:'低',medium:'中',high:'高',auto:'自动',neighbors:'相邻片段',manual:'手动输入',none:'不使用上下文'} as Record<string,string>)[option.value] ?? option.label}</option>)}
     </PixelSelect>
   </PixelField>;
-  const multiline = ['prompt','text'].includes(field.key) || field.valueType === 'array';
+  const multiline = ['prompt','text','previousText','nextText'].includes(field.key) || field.valueType === 'array';
   const arrayValue = Array.isArray(value) && !field.children ? value.join('\n') : draft;
   return <PixelField label={fieldLabel(field)} htmlFor={id} {...(description ? {description}: {})} {...(error ? {error}: {})}>
     {multiline ? <PixelTextarea id={id} disabled={disabled} value={field.valueType === 'array' && draft === initial ? arrayValue : draft} rows={field.valueType === 'array' ? 3:5}
