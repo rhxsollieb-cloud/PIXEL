@@ -113,13 +113,14 @@ async function openDetails(launch) {
   }
   catch (error) { child.window.destroy(); throw error; }
 }
-async function createProjectRuntime(directory, initial) {
+async function createProjectRuntime(directory, initial, projectId) {
   const token = randomBytes(32).toString('hex');
   const next = await startWorkbenchServer({
-    directory, apiPort: 0, frontendDirectory: join(appDirectory, 'dist'), sessionToken: token,
+    directory, frontendDirectory: join(appDirectory, 'dist'), sessionToken: token,
     ...(initial ? { initial } : {}),
+    ...(projectId ? { projectId } : {}),
     envPath: join(app.isPackaged ? app.getPath('userData') : appDirectory, '.env'),
-    ...(process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test' ? { artifacts: new FileArtifactStore(join(directory, 'artifacts')) } : {}),
+    ...(process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test' ? { apiPort: 0, artifacts: new FileArtifactStore(join(directory, 'artifacts')) } : {}),
   });
   const address = next.server.address();
   if (!address || typeof address === 'string') {
@@ -156,6 +157,7 @@ async function bindProject(next) {
 function stopProject(previous) {
   const existing = projectStops.get(previous);
   if (existing) return existing;
+  if (previous.shutdown) { const task = previous.shutdown(); projectStops.set(previous, task); return task; }
   const stopped = previous.workbench.shutdown();
   const closed = new Promise(resolve => previous.server.close(resolve));
   previous.server.closeAllConnections();
@@ -168,12 +170,13 @@ async function rememberProject(directory) {
   await mkdir(root, { recursive: true });
   const pending = join(root, `last-project.${randomUUID()}.tmp`);
   try {
-    await writeFile(pending, JSON.stringify({ version: 1, directory }), { flag: 'wx' });
+    await writeFile(pending, JSON.stringify(process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test' ? { version: 1, directory } : { version: 2, projectId: runtime.workbench.projectId }), { flag: 'wx' });
     await rename(pending, join(root, 'last-project.json'));
   } finally { await unlink(pending).catch(() => {}); }
 }
 async function openDroppedProject(event, request) {
-  if (trustedWindow(event) !== workspace || !interactive(workspace) || switchingProject || closing) {
+  const sender = trustedWindow(event);
+  if (!['workspace', 'library'].includes(sender.role) || !interactive(sender) || !interactive(workspace) || switchingProject || closing) {
     return { ok: false, error: '当前窗口暂时不能切换项目' };
   }
   switchingProject = true;
@@ -181,13 +184,16 @@ async function openDroppedProject(event, request) {
   const previous = { runtime, url: baseUrl, directory: activeDirectory, token: activeToken };
   let next;
   try {
-    const targetArtifacts = process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test'
+    const targetArtifacts = !request?.projectId && process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test'
       ? new FileArtifactStore(join((await stat(request?.path)).isDirectory() ? request.path : dirname(request.path), 'artifacts'))
       : runtime.workbench.artifacts;
-    const location = await preparePixelProjectLocation(request?.path, { artifacts: targetArtifacts });
+    const location = request?.projectId
+      ? (await runtime.projects?.state(request.projectId), { directory: activeDirectory, projectId: request.projectId })
+      : await preparePixelProjectLocation(request?.path, { artifacts: targetArtifacts });
+    if (request?.projectId && !runtime.projects) throw new Error('Shared project catalog is unavailable');
     if (closing || !host.alive) return { ok: false, error: '窗口已关闭' };
-    if (location.directory === activeDirectory) return { ok: true, title: currentSnapshot.document.title };
-    next = await createProjectRuntime(location.directory, location.initial);
+    if (location.projectId ? location.projectId === runtime.workbench.projectId : location.directory === activeDirectory) return { ok: true, title: currentSnapshot.document.title };
+    next = await createProjectRuntime(location.directory, location.initial, location.projectId);
     if (closing || !host.alive) throw new Error('Window closed during project preparation');
     // Revoke all relationships before changing the authoritative project.
     exportTickets.clear(); objectDrags.clear(); projectUnsubscribe?.();
@@ -235,12 +241,20 @@ async function start() {
   let location = { directory: process.env.PIXEL_STORAGE_DIR || join(app.getPath('userData'), 'project') };
   try {
     const saved = JSON.parse(await readFile(join(app.getPath('userData'), 'last-project.json'), 'utf8'));
+    if (saved.version === 2 && typeof saved.projectId === 'string' && /^[a-zA-Z0-9_-]{1,200}$/.test(saved.projectId)) location.projectId = saved.projectId;
     if (saved.version === 1 && typeof saved.directory === 'string' && isAbsolute(saved.directory)) location = await preparePixelProjectLocation(saved.directory, {
       envPath: join(app.isPackaged ? app.getPath('userData') : appDirectory, '.env'),
       ...(process.argv.includes('--pixel-test-storage') && process.env.NODE_ENV === 'test' ? { artifacts: new FileArtifactStore(join(saved.directory, 'artifacts')) } : {}),
     });
   } catch { /* Unavailable remembered projects do not replace the fallback project. */ }
-  await bindProject(await createProjectRuntime(location.directory, location.initial));
+  let firstProject;
+  try { firstProject = await createProjectRuntime(location.directory, location.initial, location.projectId); }
+  catch (error) {
+    if (!location.projectId || !['NOT_FOUND', 'NOT_APPLICABLE'].includes(error?.code)) throw error;
+    firstProject = await createProjectRuntime(location.directory);
+  }
+  await bindProject(firstProject);
+  await rememberProject(location.directory).catch(() => {});
   desktopSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
     callback({ cancel: new URL(details.url).origin !== new URL(baseUrl).origin });
   });
@@ -255,6 +269,12 @@ async function start() {
       projectSwitchTask = task;
       void task.finally(() => { if (projectSwitchTask === task) projectSwitchTask = undefined; }).catch(() => {});
     }
+    return task;
+  });
+  ipcMain.handle('pixel:project-open-shared', (event, request) => {
+    if (typeof request?.projectId !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(request.projectId)) return { ok: false, error: '共享项目编号无效' };
+    const task = openDroppedProject(event, { projectId: request.projectId });
+    if (!projectSwitchTask) { projectSwitchTask = task; void task.finally(() => { if (projectSwitchTask === task) projectSwitchTask = undefined; }).catch(() => {}); }
     return task;
   });
   ipcMain.handle('pixel:library-open', event => {

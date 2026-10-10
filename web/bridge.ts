@@ -21,7 +21,10 @@ export async function readVoices(query: {category:'default'|'cloned';search?:str
 
 export async function readJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, { ...(signal ? { signal } : {}) });
-  if (!response.ok) throw new Error('本地服务暂不可用');
+  if (!response.ok) {
+    const error = await response.json().catch(() => undefined) as { error?: { message?: string } } | undefined;
+    throw new Error(error?.error?.message ?? '本地服务暂不可用');
+  }
   return response.json() as Promise<T>;
 }
 

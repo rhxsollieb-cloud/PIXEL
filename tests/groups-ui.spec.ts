@@ -47,7 +47,7 @@ async function protectProviderCalls(context: BrowserContext): Promise<void> {
 async function openLibrary(page: Page): Promise<Page> {
   await page.getByTestId('viewer').click({ button: 'right' });
   const opened = page.waitForEvent('popup');
-  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  await page.getByRole('menuitem', { name: '项目管理器', exact: true }).click();
   const library = await opened;
   await expect(library.getByTestId('library-window')).toBeVisible();
   await expect(library.getByTestId('asset-groups')).toBeVisible();

@@ -8,7 +8,7 @@ import type { AssetData, GenerationArtifact } from '../src/contracts.js';
 import type { ArtifactWriteRequest, MediaArtifactStore } from '../src/generation.js';
 import { TemporaryMediaExports } from '../src/media-export.js';
 import { migrateLegacyArtifacts } from '../src/resource-migration.js';
-import { createWorkbench } from './local-workbench.js';
+import { createWorkbench, FileWorkbenchRepository, createInitialWorkbenchProject } from './local-workbench.js';
 import { startWorkbenchServer, preparePixelProjectLocation } from '../src/server.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhUYAAAAASUVORK5CYII=', 'base64');
@@ -52,7 +52,8 @@ async function directory(t: TestContext) {
 
 test('remote imports, preview byte ranges, project reopen and native export never need a local resource path', async t => {
   const root = await directory(t); const artifacts = new RemoteFixture();
-  const { server, workbench } = await startWorkbenchServer({ directory: root, apiPort: 0, artifacts, providers: { elevenlabs: false, openrouter: false } });
+  const repository = await FileWorkbenchRepository.open(root, createInitialWorkbenchProject(), artifacts);
+  const { server, workbench } = await startWorkbenchServer({ directory: root, apiPort: 0, artifacts, repository, providers: { elevenlabs: false, openrouter: false } });
   t.after(async () => { await workbench.shutdown(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); });
   const address = server.address(); assert.ok(address && typeof address === 'object'); const base = `http://127.0.0.1:${address.port}`;
   const receipt = await (await fetch(`${base}/api/import`, { method: 'POST', body: png, headers: {

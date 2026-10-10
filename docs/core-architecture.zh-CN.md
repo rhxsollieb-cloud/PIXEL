@@ -8,28 +8,28 @@
 
 1.6 在这一基础上加入素材库自定义分组、持久化轨道顺序、真实媒体多轨叠加预览、声明驱动的声音选择与参考上传，以及按实际高度分栏的上下文菜单。必要的播放、排序、上传和对象编辑控件按用户要求可见，仍受对象、作用域、共享 Action 与统一视觉约束；相关基线修正见设计哲学 1.6，具体实施与许可边界见[声纹、输入、分组与叠加预览](voices-inputs-groups-and-composition.zh-CN.md)。
 
-当前交付包含核心契约、五模型官方 SDK、Seafile 资源与本地项目状态工作台、React 界面和可启动的 Electron 桌面宿主。`src/workbench.ts` 已组合项目持久化、生成提交/outbox及内部结果挂载；本文件中标为骨架或目标的示例类仍可独立使用，不代表完整工作台的当前状态。SDK 已用模拟 HTTP 验证，尚未进行付费生成测试。参数、配置及诊断 CLI 见[模型接入与执行边界](model-integrations.zh-CN.md)，运行及独立详情窗口见[本地桌面与像素界面](desktop-ui.zh-CN.md)。当前实际使用 Electron、React、TypeScript、Vite、Zod、dnd-kit 和 Remotion；Radix 与 Zustand 仍是可选方案。
+当前交付包含核心契约、五模型官方 SDK、Seafile 共享项目及资源工作台、React 界面和 Electron 桌面宿主。workbench 组合项目持久化、生成提交/outbox及内部结果挂载；目标示例不代表正式项目 CLI/Agent 已接线。SDK 模拟 HTTP 验证，未付费生成。配置见[模型接入文档](model-integrations.zh-CN.md)，运行见[桌面说明](desktop-ui.zh-CN.md)。实际使用 Electron、React、TypeScript、Vite、Zod、dnd-kit、Remotion 和 fflate。
 
-1.7 补齐满轨创建及普通媒体右键文件选择，增加视频生成 Item 的声明驱动人工输出上传，并将资源权威统一为 Seafile。`MediaArtifactStore` 提供 write/get/listByJob/read/stat/readRange，生产 server、桌面及诊断 CLI 注入同一 Seafile adapter；本地项目、历史及操作账本与媒体存储分离，不存在共享失败后的本地资源回退。默认库和稳定 repo ID 来自可信 `.env`，旧资源迁移保留 UUID、fileRef 和原文件。完整契约、第 10 节评审和验证见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。
+1.7 的满轨创建、普通媒体 picker、人工输出与 Seafile 媒体作为[历史记录](shared-resources-and-manual-output.zh-CN.md)保留。1.8 按用户要求取消本地项目文件系统，项目/历史/回执/outbox/任务/声纹记录统一 Seafile；素材库升级项目管理器，提供可编辑整项目/单轨工程包和 SHA256 移动恢复。生产无本地项目/资源回退，共享版本发布和单编辑宿主 lease 保护团队并发；见[共享项目管理与工程包](shared-project-manager-and-packages.zh-CN.md)。
 
 ## 1. 先固定产品中的对象与操作
 
-产品采用稳定对象语法：双击进入对象详情，右键发起上下文命令，拖拽表达空间操作或关系；1.4 按用户要求增加限定于 Timeline 左侧的单击默认配置导航例外。1.6 允许相关上下文中的必要可见操作，不通过隐藏按钮牺牲可发现性；同一业务仍只有一个权威处理入口，手势及可见控件不能各写一套规则。默认主工作区仍由 Viewer 与 Timeline 构成，保留当前项目标题、必要窗口控制、播放控件和轨道排序手柄；素材库和模型参数按上下文出现。新项目为空，空 Viewer 不预置示例画面或假波形。具体历史纠偏依据见[哲学对齐记录](philosophy-alignment.zh-CN.md)，当前产品基线以设计哲学 1.7 为准。
+产品采用稳定对象语法：双击进入对象详情，右键发起上下文命令，拖拽表达空间操作或关系；1.4 按用户要求增加限定于 Timeline 左侧的单击默认配置导航例外。1.6 允许相关上下文中的必要可见操作，不通过隐藏按钮牺牲可发现性；同一业务仍只有一个权威处理入口，手势及可见控件不能各写一套规则。默认主工作区仍由 Viewer 与 Timeline 构成，保留当前项目标题、必要窗口控制、播放控件和轨道排序手柄；素材库和模型参数按上下文出现。新项目为空，空 Viewer 不预置示例画面或假波形。具体历史纠偏依据见[哲学对齐记录](philosophy-alignment.zh-CN.md)，当前产品基线以设计哲学 1.8 为准。
 
 | 对象或区域 | 双击 | 右键 | 拖拽 |
 | --- | --- | --- | --- |
-| Project | 进入项目详情 | 项目命令 | 项目文件或已有目录拖入主窗口原位置打开；空文件夹初始化并打开空项目 |
+| Project | 进入项目详情 | 项目命令 | 工程包导入新共享项目；旧目录只读迁移，空目录只供共享名称 |
 | Timeline 区域 | 左侧名称单击进入声明的详情；生成轨展示默认配置 | 空白处 → 新建时间线 → 选择类型；生成轨时间位置 → 生成草稿；文本轨 → 文本片段；生成轨左侧 → 刷新默认配置 | Asset 放置、item 移动；系统媒体进入普通媒体轨或空白区域原子放置；左侧排序手柄上下排列轨道 |
 | Timeline item | 进入参数及输出详情 | 生成、重新生成、复制、删除等 | 拖边缘修改时间范围；Asset 拖入引用区域建立 Reference；item 拖入资产库保存为资产 |
-| 资产库 | 双击资产进入详情 | 资产及资源库命令；分组在库内通过可见名称字段、操作与归属选择管理 | 外部媒体拖入导入资产 |
+| 项目管理器 | 当前资产双击进入详情 | 项目/工程包/恢复及分组使用固定可见控件 | 工程包进入项目列表，普通媒体进入当前素材区 |
 | Asset | 进入媒体详情 | 素材命令 | 建立 item 的参考素材关系 |
-| Viewer | 进入输出详情 | 素材库：打开当前项目素材上下文，空预览及已有输出均可 | 当前位置只有一个有效媒体层时，拖出已经准备好的真实文件；多层画面不伪装为已导出合成文件 |
+| Viewer | 进入输出详情 | 项目管理器：共享项目与当前素材上下文，空预览及已有输出均可 | 当前位置只有一个有效媒体层时，拖出已经准备好的真实文件；多层画面不伪装为已导出合成文件 |
 
 模型不是可拖到时间线上的媒体对象。新建操作从主 Timeline 工作区空白、已有轨道或片段上的同一个右键菜单进入“新建时间线”，选择类型后执行 `timeline.create`，只创建对应的空 Timeline，不隐式附送 Item 或提示词。生成新内容的标准路径是已有 Timeline 时间位置右键 → 新建生成草稿，提交 `item.createDraft`，只接受 `timelineId` 与 `startTick`，不接受 `assetId`，结果是不带输出的 Item。放置已有素材的标准路径是 Asset → Timeline 时间位置，提交带 `assetId` 的 `item.create`，结果是已关联该素材的 Item。插件为两者提供默认数据及约束；参数编辑随后发生在 Item 详情中。
 
 两条 GUI 路径具有不同前置对象和业务结果：从模型与时间位置发起生成草稿，从既有素材发起放置。`item.createDraft` 严格拒绝资产参数，`item.create` 要求资产；两者共享创建内核、插件校验、位置不变量和事务规则。纯文本轨复用 `item.createDraft` 创建笔记，正文经 `item.params` 编辑；普通媒体轨没有空草稿，系统文件放置通过受信 `media.placeExternal` 原子登记素材、必要的轨道和片段。已有项目数据及已保存的幂等记录不受影响。正式项目 CLI / Agent 的编辑适配器尚未实现，接线时必须复用这些 Action 与校验；本轮只读文本命令只消费同一快照投影。
 
-资产库的唯一 GUI 进入路径为主 Viewer 右键 → 素材库，空预览及已有输出均可进入。该项仍是 P03 的局部导航例外，不创建业务 Action、不修改项目快照。按用户再次纠正，1.3 将 workspace 与 library 设为非模态并行工作窗口，使用共同 `DesktopWindowHost`；打开素材库不得锁住主窗口。项目标题双击仍进入项目对象详情，其中没有素材库第二入口。库 Asset 直接拖到主 Timeline 时间位置或 Item 引用区，主 Item 直接拖到库保存复用，经可信 broker 执行原角色路由和 Action；桌面移除库内镜像时间线与输出替代来源。项目打开已补齐既有主窗口拖入路径，不增加菜单或按钮；空文件夹与已有项目容器共用进入语义，当前完成状态以第 10 节为准。
+项目管理器唯一入口是 Viewer 右键 → 项目管理器，空预览及已有输出均可；项目标题详情没有第二入口。沿用共同窗口宿主、workspace/library 非模态并行及所属窗口局部详情隔离；当前素材的分组和跨窗口放置/引用/复用不变。可见项目新建/打开、工程包导入/导出及哈希恢复仅在管理器出现，领域编辑仍走 ActionExecutor。旧目录只读迁移，不再原位置持续保存。
 
 对象关系保持浅层：
 
@@ -63,7 +63,7 @@ ProjectDocument
 | 前端播放投影 | `buildCompositionPlan` / `CompositionPreview` | 从同一快照投影轨道顺序、真实媒体及源偏移，组合 Remotion Player | 写入项目、调用生成模型或伪造合成导出文件 |
 | 前端 | `GuiActionPathRegistry` | 宿主统一登记一个动作的唯一 GUI 路径 | 限制 CLI 或 Agent 调用动作 |
 | 跨窗口宿主 | `ObjectDragBroker` / `browserWindowHost` | 可信会话的创建、解析、单次消费与结束；绑定来源和目标窗口 | 第二套业务 Action 或可写项目状态 |
-| 项目文件适配器 | `preparePixelProjectLocation` / `readWorkbenchProjectFile` | 校验项目位置、持久化结构、模型与素材；仅为空目录创建初始空快照 | 把普通文件改写成项目、合并当前项目或读取项目目录的凭证 |
+| 项目文件适配器 | `preparePixelProjectLocation` / `readWorkbenchProjectFile` | 只读校验旧容器并迁移到新共享 UUID；空目录只供名称 | 把普通文件改写成项目、合并当前项目或读取项目目录的凭证 |
 | 后端 | `BaseActionHandler` | 约束单个动作的输入校验、权限和项目更新流程 | IPC、React、模型轮询 |
 | 后端 | `ActionRegistry` | 按动作 type 注册唯一处理器 | 右键菜单与页面布局 |
 | 后端 | `ActionExecutor` | 统一执行入口，协调 revision、幂等、事务和变更通知 | 了解具体 UI 手势 |
@@ -82,7 +82,7 @@ ProjectDocument
 | 音频后处理 | `AudioPostProcessor` / `FfmpegAudioPostProcessor` | 按可信发音边界解码、裁尾、淡出与重编码，继承任务取消和超时 | 猜测最后若干字节、项目修改或第二套生成调度 |
 | 任务契约 | `GenerationJob` / `GenerationArtifact` | 可持久化任务、执行状态和输出记录 | 进入项目的 undo 栈 |
 | 任务接口 | `GenerationCoordinator` / `JobRepository` / `ArtifactStore` | 规定调度、原子状态更新和输出存储边界 | 声称完整 coordinator 已实现 |
-| 后端执行 / 资源适配器 | `GenerationRunner` / `FileJobRepository` / `MediaArtifactStore` / `SeafileArtifactStore` | 执行/恢复捕获请求，本地任务账本与共享真实媒体及 artifact 索引分开；FileArtifactStore 仅测试和迁移读取 | 生产本地媒体回退、多人项目编辑或多进程数据库锁 |
+| 后端执行 / 资源适配器 | `GenerationRunner` / `SharedJobRepository` / `MediaArtifactStore` / `SeafileArtifactStore` | 依赖 JobRepository 执行/恢复；生产用 SharedJobRepository 和 Seafile 媒体，File 仅测试/旧读取 | 生产本地媒体回退、多人项目编辑或多进程数据库锁 |
 | 生成纯函数 | `transitionJob` / `isJobAttemptCurrent` / `getGenerationResultStaleness` / `isArtifactOwnedByJob` | 校验状态转换、旧 attempt、项目结果有效性及产物归属 | 替代提交时的原子检查 |
 
 上述名称对应代码中的核心模块。`GenerationRunner`、任务 ledger 与产物存储可独立使用；项目持久化、Electron 宿主、生成提交/outbox 与受控结果挂载已由 `src/workbench.ts` 组合实现。基础类表不代表组合层已完成的能力仍待实现，也不代表正式项目 CLI / Agent 已接线。
@@ -253,7 +253,7 @@ sequenceDiagram
 
 `GenerationRequest` 除 params 与 Asset 引用外，捕获可选 `settings`、文本 `context` 和模型生成 `durationMs`。settings 优先来自 Item 的 `generationSettings` 快照；context 是请求提交时捕获的前后文，不是 Asset 引用，也不拼入当前正文。引用可声明 reference / first-frame / last-frame 角色，再由模型能力拒绝不支持的组合。三个音频模型不接收 Asset 引用；两个 OpenRouter 模型只接受图片。模型 params 的单位、默认值、角色和数量约束集中于 `ModelRegistry.prepareRequest()`，详见模型接入文档。后端配置只读取必要的 `.env` 密钥，不把整个环境注入前端。
 
-提交生成时必须在同一事务保存新 token 与 job 或 outbox，提交成功后 worker 才消费。否则崩溃可能留下新 token 却没有任务，或者任务基于尚未提交的输入开始执行。当前 `FileWorkbenchRepository` 将项目及 outbox 保存在同一持久化提交中，再由 `Workbench` 转换并消费独立任务 ledger。基础 `ProjectRepository.commit()` 骨架仍只提供文档编辑事务；其接口示例不替代工作台的联合提交实现。
+提交生成时必须在同一事务保存新 token 与 job 或 outbox，提交成功后 worker 才消费。否则崩溃可能留下新 token 却没有任务，或者任务基于尚未提交的输入开始执行。当前 DurableWorkbenchRepository 将项目、revision、回执、历史及 outbox 保存在同一提交中，生产用共享版本发布，再由 `Workbench` 转换并消费独立任务 ledger。基础 `ProjectRepository.commit()` 骨架仍只提供文档编辑事务；其接口示例不替代工作台的联合提交实现。
 
 `generationToken` 标识一次当前生成输入的有效性；影响输入的编辑或重新生成均换新 token，撤销也生成新 token，不能复用历史 token。`inputFingerprint` 对捕获的模型、参数、设置、文本 context、引用和时间语义生成稳定指纹，用于结果检查和可能的缓存。任务执行使用捕获的 request，不能中途读取 item 的最新参数。自动前后文的邻居文本、顺序或音色发生变化时，当前捕获会生成不同指纹，旧结果不能挂载；无关时间线的编辑仍不使结果失效。
 
@@ -263,7 +263,7 @@ sequenceDiagram
 
 任务终态为 `succeeded`、`failed` 和 `canceled`；终态记录不重新打开。`cancelRequested` 只能转为 `canceled`，供应商迟到的成功回调不能把它改成成功。`interrupted` 是可恢复状态，恢复到 `queued` 时 `transitionJob()` 递增 attempt、清除旧执行结果并保留已经持久化的 `providerTaskId`；恢复继续查询该远端任务。对失败或取消任务重试需创建新 job ID，本次 runner 不自动重试。
 
-每次进度、产物写入与完成回调携带 `(jobId, attempt)`，先用 `isJobAttemptCurrent()` 过滤，再通过 `JobRepository.update()` 的原子 guard 检查当前 attempt 和状态，防止旧 worker 覆盖恢复后的任务。Wan 在任务 ID checkpoint 持久化完成后才轮询；`GenerationRunner.resume()` 支持重启后继续已有远端任务，没有任务 ID 时不盲目再次提交。远端失败、取消或过期是 `REMOTE_FAILED` 终态，不当作中断恢复。当前文件适配器提供单进程任务/媒体保存；工作台启动时消费已持久化的 outbox，已中断的远端任务由对象右键显式恢复，没有远端任务 ID 时不盲目重提。取消是否已经终止供应商任务由 provider 的能力决定，不把本地取消成功等同于供应商没有计费。
+每次进度、产物写入与完成回调携带 `(jobId, attempt)`，先用 `isJobAttemptCurrent()` 过滤，再通过 `JobRepository.update()` 的原子 guard 检查当前 attempt 和状态，防止旧 worker 覆盖恢复后的任务。Wan 在任务 ID checkpoint 持久化完成后才轮询；`GenerationRunner.resume()` 支持重启后继续已有远端任务，没有任务 ID 时不盲目再次提交。远端失败、取消或过期是 `REMOTE_FAILED` 终态，不当作中断恢复。生产用 SharedJobRepository 和单宿主租约；工作台启动时消费共享项目已持久化的 outbox，已中断的远端任务由对象右键显式恢复，没有远端任务 ID 时不盲目重提。取消是否已经终止供应商任务由 provider 的能力决定，不把本地取消成功等同于供应商没有计费。
 
 ## 7. revision、幂等与 undo/redo 的边界
 
@@ -284,7 +284,13 @@ sequenceDiagram
 
 视频生成声明可提供 `capabilities.manualOutput` 和 `media.outputExternal`；宿主详情通过 `/api/media-output` 调用 `importOutputMedia()`，可信导入流程统一验证真实 MP4、解码时长及 revision，再保存 Seafile artifact 并提交内部 Action。`outputOrigin=manual`、`metadata.outputProvenance=manual|external` 区分人工/网页结果与供应商输出、参考或普通放置。原提示词、模型、位置和引用保留，offset 归零，编辑时长不超过原区间与源长度；挂载、token 旋转与所有旧任务取消 outbox 同事务提交。queued 执行前 token 检查和 running 取消共同防止旧请求覆盖，不隐式调用收费 API。
 
-共享资源索引绑定当前配置库及 UUID 固定路径、对象版本、格式、大小和 SHA256。preview Range 由宿主代理，SDK 参考读取使用同一受控字节端口；签名 URL 和凭证不进入 renderer。项目重开验证当前、历史、outbox 和 job 产物的远端资源，旧本地资源校验迁移但不删除。Windows 原生拖出使用会话临时导出副本，关闭时取消并清理，不将该副本变成 Asset 文件句柄。多人同时编辑项目、共享目录自动登记及整条作品合成导出仍待实现。
+共享索引绑定配置库、UUID、格式、大小、对象版本和 SHA256；独立 locations ledger 覆盖核验后位置，移动不改 Asset/fileRef 或项目 revision。Range 和 SDK 共用受控读取，凭证/下载 URL 不进入 renderer。合法项目的缺失媒体不阻止打开，管理器检查当前/历史并按同库真实 SHA256 恢复；索引篡改及服务/权限异常明确报错。原生拖出使用临时单媒体副本，工程包隔离 project/ 与 media/。同项目实时多人编辑、共享目录自动登记和成片合成仍待实现。
+
+### 7.2 共享持久化与工程包
+
+WorkbenchRepository 统一工作台契约，DurableWorkbenchRepository 共用 revision、幂等、history/outbox 事务；SharedProjectCatalog 与 SharedJobRepository 只提供 Seafile 读取/发布。SharedVersionedDocument 每 1000 条按 part 分片，以补零 sequence 槽位 create-only 上传；publicationId、父摘要及精确返回文件名防止竞争和相同内容写入的双成功。SharedProjectLease 为 120 秒、每 20 秒续租，每秒本机已确认到期 watchdog 及时 close/abort；付费调用前再授权，一个项目仅一个活跃宿主，不宣称实时多人合并。未指定项目时最多查询20个候选，选可取得lease的项目，全占用则建空共享项目；明确打开占用项目仍拒绝，最近ID占用/不存在时回默认可用项目。守卫在initialize消费outbox前启动。
+
+fflate ZIP32 工程包将 project/project.json、media/ 与 manifest.json 分开，256 MiB 上限并拒绝 ZIP64/DEFLATE；整包含历史相关媒体，单轨直接用原 Timeline 时钟/设置/Item/关系。导入新 Project ID/生成 token，清回执/outbox，不执行任务。缺失媒体可进入管理器；同库扫描先大小后真实 SHA256，locations 更新定位而不改 Asset ID/revision。旧项目按源路径及项目/任务摘要映射新 UUID，旧活跃任务转 interrupted，声纹操作记录一并只读迁移。完整规范与评审见[共享项目管理与工程包](shared-project-manager-and-packages.zh-CN.md)。
 
 ## 8. 插件扩展与版本迁移
 
@@ -340,11 +346,11 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 
 `DragRegistry` 的内部对象关系拖拽与原生文件拖出是两个适配边界。前者提交动作；后者由可信主进程使用已经验证的文件。它们共用产品的拖拽入口，但不混用权限和 payload。
 
-主窗口根按内容分类系统 Files：项目文件与目录进入可信宿主的项目切换；普通媒体命中 Timeline 时通过 `external.media` 与 DragRegistry 路由导入并放置，命中素材库则仅导入。capture 阶段防止关系 handler 抢占项目打开或浏览器把文件当页面导航，详情隔离仍有效，素材库明确拒绝目录。工作窗口对象 token 共用 ObjectDragTransport 与 DragRegistry；Viewer 原生拖出只消费已准备的导出票据。文件适配、项目切换与导出票据各自保留权限和生命周期边界，不能借系统 File 绕过对象权限、伪造资产或跨项目复制。
+主窗口根分类系统 Files：.pixel.zip 经共同导入服务发布新项目后打开，旧目录仅只读迁移；普通媒体命中 Timeline 经原 DragRegistry 放置，命中管理器素材区只导入。管理器项目列表的包 picker/drop 是同一服务的有限等价触发。capture 防止对象 handler 抢占或文件导航；详情隔离、可信 token 和原生票据保持权限边界。
 
-桌面打开新项目时先校验目标原位置的 `project.json`、模型参数、历史及回执、outbox、任务与素材文件。目标有未完成 outbox 或 queued / running / cancelRequested 任务时拒绝外部打开，避免打开文件自动重放收费调用；interrupted 保留原任务 ID，由 Item 右键显式恢复。空文件夹使用随机项目 ID 和文件夹名称构造空快照，在原目录原子创建 `project.json`，不预置时间线、片段或素材。非空普通目录、未知文件、不支持版本、缺失或越界素材均拒绝，原文件继续保留。
+桌面按共享 Project ID 校验状态并获取 lease 后进入。旧项目按可信源路径及完整项目/任务摘要持久映射新共享 UUID，保留 Item/Asset/历史和原文件，清回执/outbox；queued/running/cancelRequested 转 interrupted，providerTaskId 保留，只有显式恢复可继续远端任务，不自动付费重放。空目录只供共享项目命名，不补写本地 project.json。合法共享项目的缺失媒体留作修复，不等于插件 schema 迁移。
 
-会话切换撤销对象拖拽及导出票据，关闭详情与素材库；新项目绑定新的随机 loopback 端口与会话 Cookie，主窗口导航到新 origin。导航失败会恢复旧运行时与 Cookie；成功后等待旧 Workbench shutdown 保存任务中断并关闭旧 server 全部连接，旧服务清理失败不会撤销已经成功的新会话。退出等待切换任务清理。旧请求仍指向旧会话，不会向新项目提交晚到编辑或挂载输出。成功打开的目录记入宿主 `last-project.json`，下次启动尝试继续该位置；不可用时回退默认存储。模型凭证继续来自应用配置位置的 `.env`，不读取拖入项目的 `.env`。完整契约及本轮评审见[项目打开与系统拖拽](project-open-and-system-drag.zh-CN.md)。
+切换撤销旧对象拖拽/导出票据，关闭详情/管理器，绑定新 loopback 端口与 Cookie；失败恢复原会话，成功后中断并持久化旧任务、释放 lease、关闭服务连接。last-project.json 只保存最近共享 ID；旧目录记忆只作只读迁移输入。应用 .env 控制凭证及端口，FIREWALL_OPEN_PORT_RANGE 与 PORT_RANGE_START/END 默认 12000–12100，仅监听 loopback，不新增 Pixel 网页部署，也不更改供应商出站地址；见[项目打开与系统拖拽](project-open-and-system-drag.zh-CN.md)。
 
 ## 10. 当前交付与 MVP 次序
 
@@ -363,7 +369,7 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 | Agent 文本只读投影及 CLI | 已实现 HTTP / 离线共用投影、时间与正文筛选、有界 Unicode 分片和 revision 游标；没有 Agent 编辑适配器 |
 | 模型 provider 执行模板及两官方 SDK 适配器 | 已实现总超时、取消、脱敏错误、产物守卫；模拟 HTTP 验证 |
 | 视频生成 Item 人工输出 | 已实现声明驱动的 MP4 上传、manual/external 来源、真实时长、幂等及挂载/token/取消 outbox 事务；保留输入和历史，不隐式调用 SDK |
-| Seafile 共享资源与迁移 | 已实现 MediaArtifactStore 端口、媒体及索引共享、代理预览和范围读取、受控 SDK 参考读取、保留旧句柄的迁移；生产无本地资源回退；项目状态仍本地，多人编辑待实现 |
+| Seafile 项目与资源 | 已实现共享项目/历史/回执/outbox/任务/声纹记录，媒体及索引独立，受控 Range 与 SDK 读取；无生产本地回退 |
 | 时间线默认配置及明确刷新 | 已实现稀疏默认值、Item 生成设置快照与共享 Action；左侧单击配置、右键刷新；旧片段只在显式刷新时更新 |
 | 素材库自定义分组 | 已实现新建、改名、只删分组、单一成员归属及 Asset 删除清理，共用项目 Action、事务与持久化 |
 | 轨道上下顺序 | 已实现 dnd-kit 手势、`timeline.reorder`、共享顺序投影及新建 / 删除 / 外部新轨事务维护；片段时间不变 |
@@ -373,15 +379,17 @@ Viewer 拖出文件采用“提前准备输出，拖动时启动原生文件拖�
 | React Timeline、ModalHost、Viewer | Viewer + Timeline；逐层详情、分栏菜单、字段、移动/边缘拖拽、时间定位、排序与独立库已实现；相关可见操作使用共同宿主；浏览器采用同源 popup，局部详情隔离保持 |
 | 多轨叠加预览及并发播放 | 已实现 Remotion Player 真实图像 / 视频层、上下前景、透明与源偏移、并发音频及双向指针；当前 1280×720 / 60fps；合成文件导出待实现 |
 | Electron 窗口宿主及跨窗口拖拽 | 共同 `DesktopWindowHost`、非模态 workspace/library、窄 preload 与 `ObjectDragBroker` 已实现；真实窗口间放置、引用和复用及局部详情隔离已通过原生验证 |
-| 任务/资源持久化及 Wan 远端任务恢复 | 已实现本地任务 ledger、Seafile 产物存储和 runner run/resume；单后端进程 |
-| 项目持久化、token 与 job/outbox 联合事务、自动调度 | 单机文件工作台已实现；事务保存 outbox 后消费，含启动恢复及旧结果守卫 |
-| 桌面项目文件 / 目录拖入打开与空目录初始化 | 已实现原位置文件校验、空目录原子创建、动态项目 ID、独立 origin 会话、旧窗口/拖拽/票据清理及最近目录记忆；浏览器开发版仅提示使用桌面版 |
+| 共享任务与 Wan 恢复 | SharedJobRepository guard、共享产物和 run/resume 已实现；每项目单宿主，interrupted 显式恢复 |
+| 项目事务与竞争保护 | DurableWorkbenchRepository 共用 revision/回执/history/outbox 同提交，分片不可变 publication 和 lease 已实现 |
+| 项目管理器及迁移 | 已实现共享项目新建/打开、有界列表、共同非模态宿主、旧项目只读迁移，空目录不建本地文件，最近只记共享 ID |
+| 可编辑工程包与媒体恢复 | 整项目/单轨 ZIP32、SHA256 清单、project/media 分离及同库有界扫描已实现；缺失媒体可开项目修复，不包含成片渲染 |
+| 桌面宿主端口 | 统一 12000–12100 范围、loopback 监听；不新增网页部署服务或修改出站 URL |
 | 插件 schema 版本迁移器与缺失插件占位 UI | 仅设计 |
 | 真实 SDK 的后端诊断 CLI | 已实现参数文件输入、模型查询和已有任务恢复；直接执行 `backend-example` 捕获请求，不是项目 Action 适配器；未付费验证 |
 | 项目内生成提交与结果应用 | Workbench 组合 runner 与内部 Action；runner 自身不直接修改项目 |
 | 完整 undo/redo、导出准备和原生拖出 | 当前媒体的导出 ticket 与原生拖出已实现；完整 undo/redo 及合成导出待实现 |
 
-下一步在现有本地闭环上继续推进：
+下一步在共享项目闭环上继续推进：
 
 1. 实现项目版本迁移与缺失插件占位；当前不支持的文件保留原内容并拒绝打开。
 2. 实现项目 undo/redo 的受控重放及 token 更新。

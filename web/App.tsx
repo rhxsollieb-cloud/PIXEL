@@ -15,6 +15,7 @@ import { CompositionPreview } from './composition-preview.js';
 import { atPath, defaultFromSchema, FieldEditor, fieldLabel, schemaAtPath, withPath, type FieldPath } from './fields.js';
 import { VoiceCloneForm } from './voice-field.js';
 import { AssetGroups } from './asset-groups.js';
+import { ProjectManager, importProjectArchive } from './project-manager.js';
 import { SortableTimelineRow, TimelineSortHost } from './timeline-sortable.js';
 import { MediaOutputUpload, MAX_MEDIA_UPLOAD_BYTES, type ManualOutputProvenance } from './media-output-upload.js';
 import { PixelBadge, PixelContextMenu, PixelEmpty, PixelField, PixelIcon, PixelInput, PixelModalHost, PixelPanel, PixelProgress, PixelWindowHost, type PixelContextMenuItem } from './ui/index.js';
@@ -34,6 +35,9 @@ function shortModel(model: TimelineDeclaration | undefined): string {
 function iconFor(kind: string): string { return kind === 'text'?'text':kind === 'video'?'frames':kind === 'image'?'image':kind.includes('speech')?'voice':'music'; }
 function itemTitle(item: DeepReadonly<TimelineItemData>): string { return String(item.params.prompt || item.params.text || (item.kind.startsWith('text.')?'空文本片段':item.kind.includes('speech')?'未填写的对白':'新的创作片段')); }
 function MediaPreview({asset,large = false,seekSeconds,scrubbing}: {asset:DeepReadonly<AssetData>;large?:boolean;seekSeconds?:number | undefined;scrubbing?:boolean | undefined}) {
+  const [mediaVersion,setMediaVersion]=useState(0);
+  useEffect(()=>{const refresh=()=>setMediaVersion(value=>value+1);window.addEventListener('pixel:media-recovered',refresh);return()=>window.removeEventListener('pixel:media-recovered',refresh);},[]);
+  const mediaUrl=`${assetUrl(asset.id)}${mediaVersion ? `?v=${mediaVersion}` : ''}`;
   const ref = useRef<HTMLMediaElement | null>(null);
   const synchronize = () => {
     const media = ref.current;
@@ -49,11 +53,11 @@ function MediaPreview({asset,large = false,seekSeconds,scrubbing}: {asset:DeepRe
     if (!media) return;
     if(media.paused) void media.play().catch(()=>{}); else media.pause();
   };
-  if(asset.kind === 'image') return <img className={large?'media-large':'media-thumb'} src={assetUrl(asset.id)} alt={String(asset.metadata.name ?? '作品图像')}/>;
+  if(asset.kind === 'image') return <img className={large?'media-large':'media-thumb'} src={mediaUrl} alt={String(asset.metadata.name ?? '作品图像')}/>;
   return <div className={`media-playback ${large?'media-playback--large':''}`} tabIndex={0} role="group" aria-label="媒体预览，按空格播放或暂停"
     onKeyDown={event=>{if(event.key===' '){event.preventDefault();play();}}}>
-    {asset.kind === 'video' ? <video ref={element=>{ref.current=element;}} src={assetUrl(asset.id)} preload="metadata" onLoadedMetadata={synchronize}/>
-      : <><audio ref={element=>{ref.current=element;}} src={assetUrl(asset.id)} preload="metadata" onLoadedMetadata={synchronize}/><PixelIcon name="music"/></>}
+    {asset.kind === 'video' ? <video ref={element=>{ref.current=element;}} src={mediaUrl} preload="metadata" onLoadedMetadata={synchronize}/>
+      : <><audio ref={element=>{ref.current=element;}} src={mediaUrl} preload="metadata" onLoadedMetadata={synchronize}/><PixelIcon name="music"/></>}
 
   </div>;
 }
@@ -120,6 +124,9 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   const [resize,setResize]=useState<{id:string;startTick:number;durationTicks:number} | undefined>();
   const [exportTicket,setExportTicket]=useState<{assetId:string;ticket:string} | undefined>();
   const [exportRefresh,setExportRefresh]=useState(0);
+  const [mediaEpoch,setMediaEpoch]=useState(0);
+  const [mediaChannel]=useState(()=>new BroadcastChannel(`pixel-media-${session.sessionId}`));
+  useEffect(()=>{mediaChannel.onmessage=event=>{if(event.data?.projectId!==projectId)return;setMediaEpoch(value=>value+1);setExportRefresh(value=>value+1);window.dispatchEvent(new Event('pixel:media-recovered'));};return()=>mediaChannel.close();},[mediaChannel,projectId]);
   const [voiceRefresh,setVoiceRefresh]=useState(0);
   const [fieldPaths]=useState(()=>new Map<string,FieldPath>());
   const missingTypes=useRef(new Set<string>());
@@ -335,7 +342,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
   }
   function viewerMenuAt(x:number,y:number) {
     if(!store.getSnapshot() || !host.navigator.isInteractive(undefined))return;
-    setMenu({x,y,items:[{id:'navigate.library',label:'素材库',onSelect:()=>{setMenu(undefined);void windows.openLibrary().catch(()=>setFeedback({text:'素材库窗口未能打开',error:true}));}}]});
+    setMenu({x,y,items:[{id:'navigate.library',label:'项目管理器',onSelect:()=>{setMenu(undefined);void windows.openLibrary().catch(()=>setFeedback({text:'项目管理器窗口未能打开',error:true}));}}]});
   }
   function beginDrag(event:DragEvent,source:DragSource,ticksPerSecond=1000,scopeId?:string) {
     if(!host.navigator.isInteractive(scopeId)){event.preventDefault();return;}
@@ -401,7 +408,14 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
     if(!directory&&file.name.toLowerCase()!=='project.json'&&/^(audio|video|image)\//.test(mediaMimeType(file))){
       await placeMediaFile(event,file);return;
     }
-    if(!desktop){setFeedback({text:'请使用桌面版拖入项目文件或文件夹；媒体请拖入素材库',error:true});return;}
+    if(file.name.toLowerCase().endsWith('.pixel.zip')) {
+      setPending(value=>value+1);
+      try { const result=await importProjectArchive(file); if(desktop){const opened=await desktop.openSharedProject(result.id);if(!opened.ok)throw new Error(opened.error ?? '工程包已导入，项目暂时未能打开；可从项目管理器重试');} else setFeedback({text:`已导入「${result.title}」，请从项目管理器打开`,error:false}); }
+      catch(error){if(live.current)setFeedback({text:error instanceof Error?error.message:'工程包导入未完成',error:true});}
+      finally{if(live.current)setPending(value=>value-1);}
+      return;
+    }
+    if(!desktop){setFeedback({text:'请使用桌面版导入旧项目目录；工程包可从项目管理器导入',error:true});return;}
     setOpeningProject(true);setPending(value=>value+1);finishScrub.current?.();finishResize.current?.();endDrag(true);
     try{
       const result=await desktop.openDroppedProject(file);
@@ -656,9 +670,9 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
     {menu&&<PixelContextMenu key={menu.items[0]?.id} x={menu.x} y={menu.y} items={menu.items} onClose={()=>setMenu(undefined)}/>}
   </div>;
   if (libraryMode) return <>
-    <PixelWindowHost kind="library" title={<span className="library-title"><PixelIcon name="folder"/>素材库</span>} controls={<WindowControls browserClose={()=>windows.close()}/>} inert={Boolean(current)} data-testid="library-window" tabIndex={0}
+    <PixelWindowHost kind="library" title={<span className="library-title"><PixelIcon name="folder"/>项目管理器</span>} controls={<WindowControls browserClose={()=>windows.close()}/>} inert={Boolean(current)} data-testid="library-window" tabIndex={0}
       onDragEnd={()=>endDrag()} onKeyDown={event=>{if(event.key==='Escape'&&!current&&!menu&&!event.defaultPrevented){event.preventDefault();windows.close();}}}>
-      <main className="library-workspace">{library()}</main>
+      <main className="library-workspace">{snapshot && <ProjectManager snapshot={snapshot} disabled={pending>0 || Boolean(current)} timelineTitle={id=>shortModel(declarationForTimeline(models,document?.timelines[id]))} onOpen={async id=>{if(!desktop)throw new Error('切换共享项目请使用桌面版');const result=await desktop.openSharedProject(id);if(!result.ok)throw new Error(result.error ?? '项目未能打开');}} onRefresh={async()=>{await store.refresh();}} onRecovered={()=>{setExportRefresh(value=>value+1);window.dispatchEvent(new Event('pixel:media-recovered'));mediaChannel.postMessage({projectId});}}>{library()}</ProjectManager>}</main>
       {(pending>0||feedback.text)&&<span className={`detail-feedback ${feedback.error?'feedback--error':''}`} role="status" aria-live="polite">{pending?'正在保存…':feedback.text}</span>}
     </PixelWindowHost>
     {modal}
@@ -683,7 +697,7 @@ function Workbench({session}:{session:ProjectSessionDescriptor}) {
               event.dataTransfer.setData('DownloadURL',`${String(selectedAsset.metadata.mimeType)}:pixel-${selectedAsset.id}.${String(selectedAsset.metadata.extension ?? 'bin')}:${location.origin}${assetUrl(selectedAsset.id)}`);
               event.dataTransfer.setData('text/uri-list',`${location.origin}${assetUrl(selectedAsset.id)}`);
             }}>
-            {snapshot&&Boolean(compositionPlan?.layers.length)&&<CompositionPreview snapshot={snapshot} playheadMs={playheadMs} onSeek={milliseconds=>setPlayheadMs(clampPlaybackMs(milliseconds,maximumPlaybackMs))}/>}
+            {snapshot&&Boolean(compositionPlan?.layers.length)&&<CompositionPreview key={mediaEpoch} snapshot={snapshot} playheadMs={playheadMs} onSeek={milliseconds=>setPlayheadMs(clampPlaybackMs(milliseconds,maximumPlaybackMs))}/>}
             {!activeLayers.length&&<span className={`viewer-empty pixel-description ${compositionPlan?.layers.length?'viewer-empty--composition':''}`}>暂无输出</span>}
             {selectedAsset&&desktop&&exportTicket?.assetId!==selectedAsset.id&&<span className="viewer-preparing" role="status">正在准备输出…</span>}
           </div>

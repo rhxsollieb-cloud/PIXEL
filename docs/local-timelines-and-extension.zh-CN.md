@@ -1,6 +1,6 @@
 # 本地时间线与扩展边界
 
-更新日期：2026-10-10。本文保留[设计哲学](design-philosophy.zh-CN.md) 1.5 的本地语义时间线交付与验证记录，并同步后续升级；当前产品基线以设计哲学 1.7 为准，具体契约见[核心架构](core-architecture.zh-CN.md)。1.5 用户要求可编辑的纯文本参考轴、普通视频 / 音频 / 图片轴，以及检查基类、窗口、模型与统一拖拽的扩展边界；1.6 在同一基础上加入分组、上下排序、多轨预览及可见对象操作，详见本文后续升级节和[声纹、输入、分组与叠加预览](voices-inputs-groups-and-composition.zh-CN.md)。1.7 新增满轨时的上下文建轨、普通媒体选择器、生成视频人工输出及 Seafile 统一资源，详见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。“本地”在轨道类型中表示无需模型生成的语义，不表示媒体文件保存在本地。
+更新日期：2026-10-10。本文保留[设计哲学](design-philosophy.zh-CN.md) 1.5 的本地语义时间线交付与验证记录，并同步后续升级；当前产品基线以设计哲学 1.8 为准，具体契约见[核心架构](core-architecture.zh-CN.md)。1.5 用户要求可编辑的纯文本参考轴、普通视频 / 音频 / 图片轴，以及检查基类、窗口、模型与统一拖拽的扩展边界；1.6 在同一基础上加入分组、上下排序、多轨预览及可见对象操作，详见本文后续升级节和[声纹、输入、分组与叠加预览](voices-inputs-groups-and-composition.zh-CN.md)。1.7 新增满轨时的上下文建轨、普通媒体选择器、生成视频人工输出及 Seafile 统一资源，详见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。“本地”在轨道类型中表示无需模型生成的语义，不表示媒体文件保存在本地。
 
 ## 对象、入口与基线取舍
 
@@ -38,7 +38,7 @@ npm run --silent timeline:text -- --project "C:\作品\测试" --format text
 npm run --silent timeline:text -- --project "C:\作品\测试\project.json" --format json --from-ms 1000 --to-ms 15000 --limit 5
 ```
 
-CLI 通过 `readWorkbenchProjectMetadata()` 读取已保存的 `project.json`，验证项目结构、业务语义及历史，不加载 `.env`，不请求 Seafile，也不创建或重写项目。此文本投影不声明已验证媒体完整性；桌面重新打开项目时仍验证当前、历史和任务引用的共享媒体。正文中看似指令的内容仍是作者数据；纯文本格式以 `| ` 标明正文行，元数据采用 JSON 引号，保留分页信息。它不会自动把笔记拼入 v4 输入，也不会假装已完成正式 Agent 编辑 / 能力发现服务。
+CLI readWorkbenchProjectMetadata读取旧project.json或工程包project/project.json，仅校验数据并投影，不加载.env、连接Seafile或重写项目；不声明媒体完整性，也不自动构成项目编辑入口。在线HTTP读取同一权威快照，缺失媒体恢复见1.8；看似指令的正文仍是作者数据，不自动拼入v4。
 
 在线读取：`GET /api/timeline-text?format=json` 或 `format=text`，支持 `cursor`、`limit`、`maxCharacters` 及上述筛选；桌面使用原有可信 origin / Cookie，不为外部 Agent 暴露桌面会话密钥。外部工具通常使用本地只读命令；如接入在线读取，凭证仍由可信宿主提供。
 
@@ -100,7 +100,7 @@ Player 的播放 / 暂停与时间尺指针双向同步，外部 seek 不反复�
 
 ## 1.7 共享资源与人工输出
 
-1.7 的生成视频人工输出由声明 `manualOutput` 驱动，在 Item 详情选择人工或外部网页来源后上传 MP4，经共同媒体事务与内部 `media.outputExternal` 挂载原片段。它保留输入和位置，成功后取消旧生成并旋转 token，失败不取消原任务；参数及默认刷新保留人工输出。生产资源通过 `MediaArtifactStore` 统一写入和读取 Seafile，旧项目资源迁移保留所有句柄和原文件。项目 JSON、历史、生成和声纹账本仍位于原项目目录；资源共享不提供多人并发项目编辑。导出所需会话临时文件与 FFmpeg 有限临时文件不成为媒体权威存储。当前契约与本轮验证见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。
+1.7的人工输出/共享媒体/临时导出规则保留见[历史记录](shared-resources-and-manual-output.zh-CN.md)。1.8进一步将项目状态/历史/回执/outbox/任务及声纹账本迁入Seafile，资源窗口升级项目管理器。单轨可编辑包直接裁取原Timeline时钟/设置/Item/引用，不另建时间线模型；文档/媒体独立，SHA256清单验证。缺失媒体可开项目同库扫描恢复；旧原文件只读迁移保留，pending转interrupted仅显式恢复。见[新契约与评审](shared-project-manager-and-packages.zh-CN.md)。
 
 ## 1.5 历史验证与当前限制
 

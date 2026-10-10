@@ -9,6 +9,21 @@ import { modelRegistry } from '../src/models.js';
 import { createModelBackend, loadBackendConfiguration } from '../src/runtime.js';
 import { loadSeafileConfiguration } from '../src/backend-configuration.js';
 import { SeafileArtifactStore } from '../src/seafile-storage.js';
+import { DomainError } from '../src/backend.js';
+import { SharedJobRepository, SharedProjectCatalog, SharedProjectLease } from '../src/shared-projects.js';
+
+const diagnosticProjectId = 'backend-example';
+
+async function ensureDiagnosticProject(catalog: SharedProjectCatalog): Promise<void> {
+  try { await catalog.state(diagnosticProjectId); return; }
+  catch (error) { if (!(error instanceof DomainError) || error.code !== 'NOT_FOUND') throw error; }
+  try { await catalog.create('SDK 诊断', diagnosticProjectId); }
+  catch (error) {
+    if (!(error instanceof DomainError) || error.code !== 'REVISION_CONFLICT') throw error;
+    // Another diagnostic host may have created the same stable project meanwhile.
+    await catalog.state(diagnosticProjectId);
+  }
+}
 
 async function jsonObjectFile(path: string): Promise<JsonObject> {
   if ((await stat(path)).size > 1024 * 1024) throw new ProviderError('INVALID_INPUT', '参数文件超过大小上限');
@@ -22,7 +37,7 @@ async function main() {
       list: { type: 'boolean' }, model: { type: 'string' },
       'params-file': { type: 'string' }, 'settings-file': { type: 'string' },
       'reference-file': { type: 'string', multiple: true },
-      'storage-dir': { type: 'string' }, resume: { type: 'string' },
+      resume: { type: 'string' },
     },
   });
   if (values.list || (!values.model && !values.resume)) {
@@ -33,12 +48,29 @@ async function main() {
     return;
   }
   if (values.model && values.resume) throw new ProviderError('INVALID_INPUT', '新建任务和恢复任务不能同时指定');
-  const configuration = await loadBackendConfiguration({ ...(values['storage-dir'] ? { storageDirectory: values['storage-dir'] } : {}) });
-  const backend = createModelBackend(configuration, await SeafileArtifactStore.open(await loadSeafileConfiguration()));
+  const configuration = await loadBackendConfiguration();
+  const artifacts = await SeafileArtifactStore.open(await loadSeafileConfiguration());
+  await ensureDiagnosticProject(new SharedProjectCatalog(artifacts));
+  const lease = await SharedProjectLease.acquire(artifacts, diagnosticProjectId);
   const controller = new AbortController();
+  let renewalInProgress: Promise<void> | undefined;
+  const renewal = setInterval(() => {
+    if (renewalInProgress) return;
+    renewalInProgress = lease.renew()
+      .catch(() => controller.abort(new ProviderError('CANCELED', '共享诊断项目会话已失效')))
+      .finally(() => { renewalInProgress = undefined; });
+  }, 30_000);
+  renewal.unref();
+  const expiration = setInterval(() => {
+    if (Date.now() >= lease.expiresAt) controller.abort(new ProviderError('CANCELED', '共享诊断项目会话已过期'));
+  }, 1000);
+  expiration.unref();
   const cancel = () => controller.abort();
   process.once('SIGINT', cancel);
   try {
+    const backend = createModelBackend(configuration, artifacts,
+      new SharedJobRepository(artifacts, diagnosticProjectId, () => lease.assertWritable()),
+      () => lease.assertWritable());
     const options = {
       signal: controller.signal,
       onJob: (job: { id: string }) => console.log(`jobId: ${job.id}`),
@@ -67,12 +99,12 @@ async function main() {
         }
         const artifact = await backend.artifacts.write({
           attemptToken: { jobId: `import_${randomUUID()}`, attempt: 1 }, kind: 'image',
-          bytes: await readFile(file), metadata: { mimeType },
+          bytes: await readFile(file), metadata: { mimeType }, signal: controller.signal,
         });
         references.push(artifact.asset);
       }
       const request: GenerationRequest = {
-        projectId: 'backend-example', targetItemId: 'example-item', generationToken: randomUUID(),
+        projectId: diagnosticProjectId, targetItemId: 'example-item', generationToken: randomUUID(),
         inputFingerprint: 'computed-by-host', providerId: descriptor.providerId, providerVersion: descriptor.providerVersion,
         modelId: values.model, params, settings, references,
       };
@@ -85,7 +117,13 @@ async function main() {
       if (artifact) console.log(artifact.asset.fileRef);
     }
     if (job.state !== 'succeeded') process.exitCode = 1;
-  } finally { process.removeListener('SIGINT', cancel); }
+  } finally {
+    clearInterval(renewal);
+    clearInterval(expiration);
+    process.removeListener('SIGINT', cancel);
+    await renewalInProgress;
+    await lease.release().catch(() => undefined);
+  }
 }
 
 main().catch(error => {

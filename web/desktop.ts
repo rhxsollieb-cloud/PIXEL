@@ -8,6 +8,7 @@ export interface PixelDesktop extends ObjectDragTransport {
   readonly isDetailWindow: boolean;
   readonly isLibraryWindow: boolean;
   openDroppedProject(file: File): Promise<{ ok: boolean; title?: string; error?: string }>;
+  openSharedProject(projectId: string): Promise<{ ok: boolean; title?: string; error?: string }>;
   openDetails(request: { object: ObjectRef }): Promise<void>;
   openLibrary(): Promise<void>;
   onLibraryClosed(listener: () => void): Unsubscribe;

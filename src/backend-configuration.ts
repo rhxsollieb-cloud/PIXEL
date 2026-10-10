@@ -12,6 +12,8 @@ export interface SeafileConfiguration {
   libraryName: string;
   rootPath: string;
   allowedFileOrigins: readonly string[];
+  /** Explicit external origin when Seafile advertises an internal file-service port. */
+  fileServerUrl?: string;
   timeoutMs: number;
   maxBytes: number;
 }
@@ -65,6 +67,7 @@ export async function loadSeafileConfiguration(options: { envPath?: string; envi
     };
     return { serverUrl: server.href, ...(token ? { token } : { username, password }), ...(repoId ? { repoId } : {}), libraryName,
       rootPath: rootPath.replace(/\/+$/, '') || '/', allowedFileOrigins: [...allowedFileOrigins],
+      ...(field('SEAFILE_FILE_SERVER_URL') ? { fileServerUrl: new URL(field('SEAFILE_FILE_SERVER_URL')).origin } : {}),
       timeoutMs: integer('SEAFILE_TIMEOUT_MS', 60_000, 300_000), maxBytes: integer('SEAFILE_MAX_BYTES', 512 * 1024 * 1024, 1024 * 1024 * 1024) };
   } catch { throw new ProviderError('INVALID_INPUT', 'Seafile 服务地址、资料库、目录或传输配置无效'); }
 }

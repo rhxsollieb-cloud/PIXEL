@@ -337,7 +337,7 @@ test('trusted parent IPC closes the Windows-compatible local host cleanly withou
   const address = probe.address(); assert.ok(address && typeof address === 'object');
   const apiPort = address.port;
   await new Promise<void>(accept => probe.close(() => accept()));
-  const child = spawn(process.execPath, ['--import', 'tsx', resolve('scripts/test-host.mjs')], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: { ...process.env, PIXEL_STORAGE_DIR: root, PIXEL_API_PORT: String(apiPort), ELEVENLABS_API_KEY: '', OPENROUTER_API_KEY: '' } });
+  const child = spawn(process.execPath, ['--import', 'tsx', resolve('scripts/test-host.mjs')], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: { ...process.env, FIREWALL_OPEN_PORT_RANGE: `${apiPort}-${apiPort}`, PORT_RANGE_START: String(apiPort), PORT_RANGE_END: String(apiPort), PIXEL_STORAGE_DIR: root, PIXEL_API_PORT: String(apiPort), ELEVENLABS_API_KEY: '', OPENROUTER_API_KEY: '' } });
   let output = ''; let acknowledged = false; let exited = false; let exitCode: number | null = null;
   child.stdout!.on('data', data => { output += data.toString(); });
   child.stderr!.on('data', data => { output += data.toString(); });

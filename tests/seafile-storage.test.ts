@@ -5,6 +5,11 @@ import type { DeepReadonly, GenerationArtifact, GenerationRequest } from '../src
 import { loadSeafileConfiguration, type SeafileConfiguration } from '../src/backend-configuration.js';
 import { BaseModelProvider, ProviderError, type ProviderRunContext } from '../src/generation.js';
 import { SeafileArtifactStore } from '../src/seafile-storage.js';
+import { SharedProjectCatalog, SharedVersionedDocument } from '../src/shared-projects.js';
+import { startWorkbenchServer } from '../src/server.js';
+import { mkdtemp, lstat, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 
 const repoId = '29aab405-8aa0-4592-a9a2-eb1989a72aab';
 const serverUrl = 'http://seafile.example.test/';
@@ -46,9 +51,9 @@ function remote() {
       if (url.pathname === `/api2/repos/${repoId}/`) return json(libraries[0]);
       const path = url.searchParams.get('p') ?? '/';
       if (url.pathname.endsWith('/dir/')) {
-        if (method === 'POST') { assert.ok(init.body instanceof URLSearchParams); assert.equal(init.body.get('operation'), 'mkdir'); directories.add(path); return json('success', 201); }
+        if (method === 'POST') { assert.ok(init.body instanceof URLSearchParams); assert.equal(init.body.get('operation'), 'mkdir'); const parts = path.split('/').filter(Boolean); for (let i = 1; i <= parts.length; i++) directories.add(`/${parts.slice(0, i).join('/')}`); return json('success', 201); }
         if (!directories.has(path)) return json({}, 404);
-        return json([...files.keys()].filter(file => file.slice(0, file.lastIndexOf('/')) === path).map(file => ({ type: 'file', name: file.slice(file.lastIndexOf('/') + 1) })));
+        return json([... [...files.keys()].filter(file => file.slice(0, file.lastIndexOf('/')) === path).map(file => ({ type: 'file', name: file.slice(file.lastIndexOf('/') + 1) })), ...[...directories].filter(dir => dir !== '/' && (dir.slice(0, dir.lastIndexOf('/')) || '/') === path).map(dir => ({ type: 'dir', name: dir.slice(dir.lastIndexOf('/') + 1) }))]);
       }
       if (url.pathname.endsWith('/upload-link/')) return json(`${controls.untrustedLink ? 'http://attacker.example.test' : new URL(serverUrl).origin}/upload-api/link?dir=${encodeURIComponent(path)}`);
       if (url.pathname.endsWith('/file/detail/')) {
@@ -94,7 +99,7 @@ function remote() {
     }
     throw new Error('unhandled mock API request');
   };
-  return { transport, files, requests, controls, mediaUploadStarted, setLibraries: (value: typeof libraries) => { libraries = value; } };
+  return { transport, files, directories, requests, controls, mediaUploadStarted, setLibraries: (value: typeof libraries) => { libraries = value; } };
 }
 
 test('Seafile configuration reads existing credentials and validates remote scope without revealing secrets', async () => {
@@ -111,6 +116,92 @@ test('Seafile configuration reads existing credentials and validates remote scop
     { SEAFILE_URL: 'https://seafile.example.test/', SEAFILE_TOKEN: privateToken, SEAFILE_FILE_SERVER_URL: 'http://seafile.example.test/' },
     { SEAFILE_URL: serverUrl, SEAFILE_ADMIN_PASSWORD: 'private-password' },
   ]) await assert.rejects(loadSeafileConfiguration({ envPath: 'does-not-exist.pixel-test.env', environment }), error => error instanceof ProviderError && !/private-password|private-account|private-test-token/.test(error.message));
+});
+
+test('Seafile project versions are create-only and stale publication cannot overwrite the shared winner', async () => {
+  const fixture = remote(); const store = await SeafileArtifactStore.open(configuration(), { fetch: fixture.transport });
+  const catalog = new SharedProjectCatalog(store); const id = await catalog.create('Seafile 作品');
+  assert.equal((await catalog.list()).items[0]?.id, id);
+  const file = new SharedVersionedDocument(store, 'operations/cas-test', value => value);
+  await file.publish(undefined, { revision: 0 }); const current = await file.read();
+  const results = await Promise.allSettled([file.publish(current, { revision: 1, actor: 'A' }), file.publish(current, { revision: 1, actor: 'B' })]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(fixture.requests.some(request => request.method === 'PUT' || request.method === 'DELETE'), false);
+  assert.ok(fixture.files.has(`/pixel/projects/${id}/state/part-000000000/000000000000.json`));
+});
+
+test('explicit file-service mapping routes internal advertised ports through the configured origin and rejects foreign hosts', async () => {
+  const fixture = remote();
+  const mappedTransport: typeof fetch = async (input, init) => {
+    const response = await fixture.transport(input, init);
+    const url = new URL(String(input));
+    if (response.ok && (url.pathname.endsWith('/upload-link/') || url.pathname.endsWith('/file/'))) {
+      const advertised = new URL(await response.json() as string); advertised.port = '8090';
+      return json(advertised.href);
+    }
+    return response;
+  };
+  const store = await SeafileArtifactStore.open(configuration({ fileServerUrl: serverUrl }), { fetch: mappedTransport });
+  const artifact = await store.write({ attemptToken: { jobId: 'mapped', attempt: 1 }, kind: 'image', metadata: { mimeType: 'image/png' }, bytes: new Uint8Array([1, 2, 3]) });
+  assert.deepEqual((await store.read(artifact.asset, new AbortController().signal)).bytes, new Uint8Array([1, 2, 3]));
+  fixture.controls.untrustedLink = true;
+  await assert.rejects(store.read(artifact.asset, new AbortController().signal), /未经配置/);
+});
+
+test('a new team host can open another project when the first is occupied without stealing its lease', async t => {
+  const fixture = remote(); const store = await SeafileArtifactStore.open(configuration(), { fetch: fixture.transport });
+  const catalog = new SharedProjectCatalog(store); await catalog.create('Project A', 'A'); await catalog.create('Project B', 'B');
+  const first = await startWorkbenchServer({ artifacts: store, projectId: 'A', apiPort: 0, providers: { elevenlabs: false, openrouter: false } });
+  t.after(() => first.shutdown());
+  const second = await startWorkbenchServer({ artifacts: store, directory: 'does-not-exist.pixel-team-test', apiPort: 0, providers: { elevenlabs: false, openrouter: false } });
+  t.after(() => second.shutdown());
+  assert.equal(first.workbench.projectId, 'A'); assert.equal(second.workbench.projectId, 'B');
+  await assert.rejects(startWorkbenchServer({ artifacts: store, projectId: 'A', apiPort: 0, providers: { elevenlabs: false, openrouter: false } }), /其他 Pixel/);
+  assert.equal((await catalog.state('A')).snapshot.document.title, 'Project A');
+});
+
+test('moved and renamed media is recovered by SHA256 without changing asset identity or project state', async () => {
+  const fixture = remote(); const store = await SeafileArtifactStore.open(configuration(), { fetch: fixture.transport });
+  const artifact = await store.write({ attemptToken: { jobId: 'job', attempt: 1 }, kind: 'image', metadata: { mimeType: 'image/png' }, bytes: new Uint8Array([1, 2, 3]) });
+  const original = `/pixel/media/${artifact.id}.png`; const moved = '/team/storyboards/renamed-picture.dat';
+  fixture.directories.add('/team'); fixture.directories.add('/team/storyboards');
+  fixture.files.set(moved, fixture.files.get(original)!); fixture.files.delete(original);
+  await assert.rejects(store.stat(artifact.asset), /不存在/);
+  const before = structuredClone(artifact);
+  const report = await store.recoverMedia([artifact.asset], new AbortController().signal);
+  assert.deepEqual(report.repaired, [artifact.id]); assert.deepEqual(report.missing, []);
+  assert.deepEqual(artifact, before);
+  assert.equal((await store.get(artifact.id))?.asset.fileRef, before.asset.fileRef);
+  assert.deepEqual((await store.read(artifact.asset, new AbortController().signal)).bytes, new Uint8Array([1, 2, 3]));
+  assert.deepEqual((await store.readRange(artifact.asset, { start: 1, end: 2 }, new AbortController().signal)).bytes, new Uint8Array([2, 3]));
+  assert.equal(fixture.files.has(original), false, 'recovery links to the moved file rather than copying it back');
+});
+
+test('hash recovery rejects same-size wrong content and cancellation without publishing a location', async () => {
+  const fixture = remote(); const store = await SeafileArtifactStore.open(configuration(), { fetch: fixture.transport });
+  const artifact = await store.write({ attemptToken: { jobId: 'job', attempt: 1 }, kind: 'image', metadata: { mimeType: 'image/png' }, bytes: new Uint8Array([1, 2, 3]) });
+  fixture.files.delete(`/pixel/media/${artifact.id}.png`);
+  fixture.files.set(`/pixel/media/guess.png`, { bytes: new Uint8Array([4, 5, 6]), id: 'a'.repeat(40) });
+  const report = await store.recoverMedia([artifact.asset], new AbortController().signal);
+  assert.deepEqual(report.repaired, []); assert.deepEqual(report.missing, [artifact.id]);
+  assert.equal([...fixture.files.keys()].some(path => path.startsWith('/pixel/locations/')), false);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(store.recoverMedia([artifact.asset], controller.signal), /取消/);
+});
+
+test('production shared host never creates a local project or task directory and releases its editing lease on shutdown', async context => {
+  const fixture = remote(); const store = await SeafileArtifactStore.open(configuration(), { fetch: fixture.transport });
+  const catalog = new SharedProjectCatalog(store); const id = await catalog.create('Cloud');
+  const root = await mkdtemp(join(tmpdir(), 'pixel-cloud-host-')); const directory = join(root, 'must-stay-absent');
+  context.after(async () => { const checked = resolve(root); assert.equal(dirname(checked), resolve(tmpdir())); assert.ok(basename(checked).startsWith('pixel-cloud-host-')); await rm(checked, { recursive: true, force: true }); });
+  const host = await startWorkbenchServer({ directory, projectId: id, artifacts: store, providers: { elevenlabs: false, openrouter: false }, apiPort: 0 });
+  context.after(() => host.shutdown());
+  const result = await host.workbench.execute({ projectId: id, expectedRevision: 0, requestId: randomUUID(), type: 'project.title', payload: { title: 'Shared change' } });
+  assert.equal(result.ok, true);
+  await assert.rejects(lstat(directory), error => (error as NodeJS.ErrnoException).code === 'ENOENT');
+  await host.shutdown();
+  const reopened = await startWorkbenchServer({ directory, projectId: id, artifacts: store, providers: { elevenlabs: false, openrouter: false }, apiPort: 0 });
+  assert.equal((await reopened.workbench.snapshot()).document.title, 'Shared change'); await reopened.shutdown();
 });
 
 test('Seafile uploads publish media before index, survive fresh store recovery and preserve opaque handles', async () => {

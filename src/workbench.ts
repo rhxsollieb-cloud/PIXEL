@@ -23,6 +23,7 @@ import { TemporaryMediaExports } from './media-export.js';
 import type { VoiceService } from './voices.js';
 import type { VoiceCloneInput, VoiceCloneResult, VoiceQuery, VoicePage } from './voice-contracts.js';
 import { readWorkbenchProjectFile, validateWorkbenchProjectFile, workbenchOutboxSchema, type WorkbenchOutboxEntry as OutboxEntry, type WorkbenchProjectFile as WorkbenchFile } from './project-files.js';
+import { FileArtifactStore } from './storage.js';
 
 export const WORKBENCH_PROJECT_ID = 'pixel-project';
 const idSchema = z.string().min(1).max(200);
@@ -53,49 +54,43 @@ async function atomicFile(path: string, value: unknown, createOnly = false): Pro
 }
 
 /** 单进程宿主：项目、幂等记录、历史和生成 outbox 在同一个文件提交。 */
-export class FileWorkbenchRepository implements ProjectRepository {
+export interface WorkbenchRepository extends ProjectRepository {
+  readonly projectId: string;
+  outbox(): Promise<OutboxEntry[]>;
+  receipt(actorId: string, requestId: string): Promise<ActionReceipt | undefined>;
+  completeOutbox(id: string): Promise<void>;
+  exportState(): Promise<WorkbenchFile>;
+}
+
+/** Storage adapters share the same revision, receipt, history and outbox transaction. */
+export class DurableWorkbenchRepository implements WorkbenchRepository {
   private serial: Promise<unknown> = Promise.resolve();
-  private constructor(private readonly path: string, private state: WorkbenchFile) {}
+  constructor(private state: WorkbenchFile, private readonly persistence: {
+    read(): Promise<WorkbenchFile>;
+    publish(before: WorkbenchFile, after: WorkbenchFile): Promise<void>;
+  }) {}
   get projectId(): string { return this.state.snapshot.document.id; }
 
-  static async open(directory: string, initial: ProjectSnapshot, mediaStore?: MediaArtifactStore): Promise<FileWorkbenchRepository> {
-    const root = resolve(directory);
-    await mkdir(root, { recursive: true });
-    const path = join(root, 'project.json');
-    let state: WorkbenchFile;
-    try {
-      state = await readWorkbenchProjectFile(root, mediaStore ? { mediaStore } : {});
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        if (error instanceof DomainError) throw error;
-        throw new DomainError('INTERNAL', '项目存储无法读取，请保留文件后检查版本');
-      }
-      state = validateWorkbenchProjectFile({ version: 1, snapshot: structuredClone(initial), requests: {}, history: [], outbox: [] });
-      try { await atomicFile(path, state, true); }
-      catch (writeError) {
-        if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') throw writeError;
-        state = await readWorkbenchProjectFile(root, mediaStore ? { mediaStore } : {});
-      }
-    }
-    return new FileWorkbenchRepository(path, state);
-  }
   private async locked<T>(operation: () => Promise<T>): Promise<T> {
-    const next = this.serial.catch(() => {}).then(operation);
+    const next = this.serial.catch(() => {}).then(async () => {
+      this.state = await this.persistence.read();
+      return operation();
+    });
     this.serial = next;
     return next;
   }
   async read(projectId: string): Promise<ProjectSnapshot> {
-    await this.serial.catch(() => {});
-    if (projectId !== this.state.snapshot.document.id) throw new DomainError('NOT_FOUND', '项目不存在');
-    return structuredClone(this.state.snapshot);
+    return this.locked(async () => {
+      if (projectId !== this.projectId) throw new DomainError('NOT_FOUND', '项目不存在');
+      return structuredClone(this.state.snapshot);
+    });
   }
   async outbox(): Promise<OutboxEntry[]> {
-    await this.serial.catch(() => {});
-    return structuredClone(this.state.outbox.filter(entry => !entry.done));
+    return this.locked(async () => structuredClone(this.state.outbox.filter(entry => !entry.done)));
   }
+  async exportState(): Promise<WorkbenchFile> { return this.locked(async () => structuredClone(this.state)); }
   async receipt(actorId: string, requestId: string): Promise<ActionReceipt | undefined> {
-    await this.serial.catch(() => {});
-    return structuredClone(this.state.requests[JSON.stringify([actorId, requestId])]?.receipt);
+    return this.locked(async () => structuredClone(this.state.requests[JSON.stringify([actorId, requestId])]?.receipt));
   }
   async completeOutbox(id: string): Promise<void> {
     await this.locked(async () => {
@@ -103,7 +98,7 @@ export class FileWorkbenchRepository implements ProjectRepository {
       const entry = next.outbox.find(candidate => candidate.id === id);
       if (!entry || entry.done) return;
       entry.done = true;
-      await atomicFile(this.path, next);
+      await this.persistence.publish(this.state, next);
       this.state = next;
     });
   }
@@ -129,25 +124,52 @@ export class FileWorkbenchRepository implements ProjectRepository {
       for (const command of [...(mutation.outcome.generationCommand === undefined ? [] : [mutation.outcome.generationCommand]), ...(Array.isArray(commands) ? commands : [])]) {
         const entry = workbenchOutboxSchema.parse(command) as OutboxEntry;
         if (entry.request && entry.request.projectId !== draft.id) throw new DomainError('INVALID_INPUT', '生成记录不属于当前项目');
-        if (entry.operation === 'start' && next.outbox.some(current => !current.done && current.operation === 'start' && current.itemId === entry.itemId)) {
-          throw new DomainError('NOT_APPLICABLE', '该片段的生成任务尚未结束');
-        }
+        if (entry.operation === 'start' && next.outbox.some(current => !current.done && current.operation === 'start' && current.itemId === entry.itemId)) throw new DomainError('NOT_APPLICABLE', '该片段的生成任务尚未结束');
         if (entry.operation !== 'cancel' && next.outbox.some(current => !current.done && current.jobId === entry.jobId)) throw new DomainError('NOT_APPLICABLE', '该任务已排队');
         next.outbox.push(entry);
       }
       const revision = next.snapshot.revision + 1;
       if (!Number.isSafeInteger(revision)) throw new DomainError('INTERNAL', '项目版本超出范围');
       const outcome = structuredClone(mutation.outcome);
-      delete outcome.generationCommand;
-      delete outcome.generationCommands;
+      delete outcome.generationCommand; delete outcome.generationCommands;
       const receipt: ActionReceipt = { ok: true, requestId: envelope.requestId, projectId: envelope.projectId, revision, undoable: mutation.undoable, outcome };
       next.snapshot = { revision, document: structuredClone(draft) };
       if (mutation.undoable) next.history.push({ requestId: envelope.requestId, before: structuredClone(before), after: structuredClone(draft) });
       next.requests[requestKey] = { signature, receipt };
-      await atomicFile(this.path, next);
+      await this.persistence.publish(this.state, next);
       this.state = next;
       return { receipt: structuredClone(receipt), replayed: false };
     });
+  }
+}
+
+/** Explicit legacy/test adapter; production injects the Seafile repository. */
+export class FileWorkbenchRepository extends DurableWorkbenchRepository {
+  private constructor(path: string, state: WorkbenchFile) {
+    let current = state;
+    super(state, { read: async () => current, publish: async (_before, after) => { await atomicFile(path, after); current = after; } });
+  }
+
+  static async open(directory: string, initial: ProjectSnapshot, mediaStore?: MediaArtifactStore): Promise<FileWorkbenchRepository> {
+    const root = resolve(directory);
+    await mkdir(root, { recursive: true });
+    const path = join(root, 'project.json');
+    let state: WorkbenchFile;
+    try {
+      state = await readWorkbenchProjectFile(root, mediaStore ? { mediaStore } : {});
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        if (error instanceof DomainError) throw error;
+        throw new DomainError('INTERNAL', '项目存储无法读取，请保留文件后检查版本');
+      }
+      state = validateWorkbenchProjectFile({ version: 1, snapshot: structuredClone(initial), requests: {}, history: [], outbox: [] });
+      try { await atomicFile(path, state, true); }
+      catch (writeError) {
+        if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') throw writeError;
+        state = await readWorkbenchProjectFile(root, mediaStore ? { mediaStore } : {});
+      }
+    }
+    return new FileWorkbenchRepository(path, state);
   }
 }
 
@@ -190,6 +212,11 @@ function assetOf(document: ProjectDocument, id: string): AssetData {
   const asset = Object.hasOwn(document.assets, id) ? document.assets[id] : undefined;
   if (!asset) throw new DomainError('NOT_FOUND', '资产不存在');
   return asset;
+}
+function projectAsset(asset: AssetData): AssetData {
+  const result = structuredClone(asset);
+  delete result.metadata.storage;
+  return result;
 }
 function invalidate(document: ProjectDocument, item: TimelineItemData): void {
   item.generationToken = randomUUID();
@@ -262,6 +289,7 @@ export interface WorkbenchOptions {
   initial?: ProjectSnapshot;
   voices?: VoiceService;
   artifacts?: MediaArtifactStore;
+  repository?: WorkbenchRepository;
 }
 
 export class Workbench {
@@ -287,7 +315,7 @@ export class Workbench {
   private voiceClosing: Promise<void> | undefined;
   private readonly voiceExecutions = new Set<Promise<VoiceCloneResult>>();
 
-  constructor(readonly repository: FileWorkbenchRepository, readonly runner: GenerationRunner | undefined, directory: string, providers: { elevenlabs: boolean; openrouter: boolean }, readonly voices?: VoiceService, artifacts?: MediaArtifactStore) {
+  constructor(readonly repository: WorkbenchRepository, readonly runner: GenerationRunner | undefined, directory: string, providers: { elevenlabs: boolean; openrouter: boolean }, readonly voices?: VoiceService, artifacts?: MediaArtifactStore) {
     this.projectId = repository.projectId;
     this.caller = { actorId: 'local-gui', source: 'gui', projectIds: new Set([this.projectId]), permissions: new Set(['project.edit', 'generation.submit']) };
     this.internal = { actorId: 'generation-host', source: 'internal', projectIds: new Set([this.projectId]), permissions: new Set(['generation.apply']) };
@@ -505,7 +533,7 @@ export class Workbench {
         document.timelines[timeline.id] = timeline;
         if (document.timelineOrder) document.timelineOrder.push(timeline.id);
       }
-      document.assets[input.asset.id] = input.asset;
+      document.assets[input.asset.id] = projectAsset(input.asset);
       const outcome = createItem(document, { timelineId: timeline.id, startTick: input.startTick, assetId: input.asset.id });
       return { ...outcome, timelineId: timeline.id, assetId: input.asset.id, importFingerprint: input.asset.metadata.importFingerprint ?? null };
     });
@@ -565,7 +593,7 @@ export class Workbench {
     add('item.reference.add', z.strictObject({ itemId: idSchema, assetId: idSchema }), addReference);
     add('media.referenceExternal', z.strictObject({ itemId: idSchema, asset: assetSchema }), (document, { itemId, asset }, caller) => {
       if (caller.source !== 'internal') throw new DomainError('FORBIDDEN', '参考文件必须先由宿主验证');
-      document.assets[asset.id] = asset;
+      document.assets[asset.id] = projectAsset(asset);
       return { ...addReference(document, { itemId, assetId: asset.id }), importFingerprint: asset.metadata.importFingerprint ?? null };
     });
     add('media.outputExternal', z.strictObject({ itemId: idSchema, provenance: z.enum(['manual', 'external']), asset: assetSchema, cancelJobIds: z.array(z.uuid()).max(1000) }), (document, { itemId, provenance, asset, cancelJobIds }, caller) => {
@@ -585,7 +613,7 @@ export class Workbench {
       item.generationToken = randomUUID();
       item.outputAssetId = asset.id;
       item.outputOrigin = 'manual';
-      document.assets[asset.id] = asset;
+      document.assets[asset.id] = projectAsset(asset);
       const commands: OutboxEntry[] = [...new Set(cancelJobIds)].map(jobId => ({ id: randomUUID(), operation: 'cancel', jobId, itemId, done: false }));
       return { itemId, assetId: asset.id, provenance, durationTicks: item.durationTicks, importFingerprint: asset.metadata.importFingerprint ?? null, generationCommands: commands as unknown as JsonObject[] };
     });
@@ -598,7 +626,7 @@ export class Workbench {
     });
     add('asset.import', z.strictObject({ asset: assetSchema }), (document, { asset }, caller) => {
       if (caller.source !== 'internal') throw new DomainError('FORBIDDEN', '资产只能由宿主验证并导入');
-      document.assets[asset.id] = asset;
+      document.assets[asset.id] = projectAsset(asset);
       return { assetId: asset.id, importFingerprint: asset.metadata.importFingerprint ?? null };
     });
     add('asset.remove', z.strictObject({ assetId: idSchema }), (document, { assetId }) => {
@@ -650,7 +678,7 @@ export class Workbench {
       if (item.generationToken !== input.generationToken || captureGenerationRequest(document, item).inputFingerprint !== input.inputFingerprint) throw new DomainError('STALE_RESULT', '片段已变更，保留产物但不覆盖当前输入');
       const timeline = timelineOf(document, item.timelineId);
       if (timeline.modelId === undefined || input.asset.kind !== modelRegistry.resolve(timeline.modelId).outputKind) throw new DomainError('INVALID_INPUT', '生成产物类型与时间线模型不一致');
-      document.assets[input.asset.id] = input.asset;
+      document.assets[input.asset.id] = projectAsset(input.asset);
       item.outputAssetId = input.asset.id;
       item.outputOrigin = 'generated';
       return { itemId: item.id, assetId: input.asset.id, jobId: input.jobId };
@@ -848,12 +876,14 @@ export function detectMedia(bytes: Uint8Array, mimeType: string): AssetData['kin
   return mimeType.startsWith('image/') ? 'image' : mimeType.startsWith('audio/') ? 'audio' : 'video';
 }
 
-export async function createWorkbench(options: WorkbenchOptions = {}): Promise<Workbench> {
+export async function createWorkbench(options: WorkbenchOptions = {}, beforeInitialize?: (workbench: Workbench) => void): Promise<Workbench> {
   const directory = resolve(options.directory ?? '.pixel');
   const artifacts = options.artifacts ?? options.runner?.artifacts;
   if (!artifacts) throw new DomainError('INVALID_INPUT', '工作台需要显式注入共享资源存储');
-  const repository = await FileWorkbenchRepository.open(directory, options.initial ?? createInitialWorkbenchProject(), artifacts);
+  if (!options.repository && !(artifacts instanceof FileArtifactStore)) throw new DomainError('INVALID_INPUT', '共享存储工作台需要显式注入项目仓库');
+  const repository = options.repository ?? await FileWorkbenchRepository.open(directory, options.initial ?? createInitialWorkbenchProject(), artifacts);
   const workbench = new Workbench(repository, options.runner, directory, options.providers ?? { elevenlabs: Boolean(options.runner), openrouter: Boolean(options.runner) }, options.voices, artifacts);
-  await workbench.initialize();
+  try { beforeInitialize?.(workbench); await workbench.initialize(); }
+  catch (error) { await workbench.shutdown().catch(() => {}); throw error; }
   return workbench;
 }

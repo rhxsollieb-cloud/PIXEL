@@ -48,7 +48,7 @@ export function sanitizeVoiceError(error: unknown): VoiceServiceError {
   return voiceError('UPSTREAM');
 }
 
-const ledgerSchema = z.object({
+export const voiceOperationSchema = z.object({
   version: z.literal(1), command: z.literal('voice.clone'), requestId: z.string(),
   accountScope: z.string(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   state: z.enum(['attempted', 'succeeded', 'failed', 'unknown']),
@@ -56,7 +56,11 @@ const ledgerSchema = z.object({
   result: voiceCloneResultSchema.optional(),
   errorCode: z.enum(['INVALID_INPUT', 'AUTHENTICATION', 'FORBIDDEN', 'RATE_LIMITED', 'OUTCOME_UNKNOWN']).optional(),
 }).strict();
-type VoiceOperation = z.infer<typeof ledgerSchema>;
+type VoiceOperation = z.infer<typeof voiceOperationSchema>;
+export interface VoiceOperationStore {
+  read(key: string): Promise<VoiceOperation | undefined>;
+  save(key: string, value: VoiceOperation, createOnly: boolean): Promise<boolean>;
+}
 type CachedPage = { accountScope: string; category: VoiceQuery['category']; search: string; items: VoiceSummary[];
   nextProviderCursor?: string; expiresAt: number };
 const cursorSchema = z.object({ v: z.literal(1), id: z.string().uuid(), offset: z.number().int().nonnegative() }).strict();
@@ -86,7 +90,7 @@ export class VoiceService {
   private closed = false;
   private shutdownPromise: Promise<void> | undefined;
   constructor(private readonly provider: VoiceProvider, private readonly ledgerDirectory: string,
-    options: { timeoutMs?: number } = {}) {
+    private readonly options: { timeoutMs?: number; operations?: VoiceOperationStore } = {}) {
     this.timeoutMs = options.timeoutMs ?? 120_000;
     if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0 || !provider.accountScope || provider.accountScope.length > 200) {
       throw voiceError('INVALID_INPUT');
@@ -238,6 +242,7 @@ export class VoiceService {
     }
   }
   private async readOperation(path: string): Promise<VoiceOperation | undefined> {
+    if (this.options.operations) return this.options.operations.read(path.split(sep).at(-1)!.replace(/\.json$/, ''));
     if (!await this.ensureDirectory(false) || !await this.checkRecord(path)) return undefined;
     let text: string;
     try {
@@ -255,7 +260,7 @@ export class VoiceService {
     catch (error) { if (nodeCode(error) === 'ENOENT') return undefined; throw voiceError('UPSTREAM'); }
     try {
       if (Buffer.byteLength(text, 'utf8') > 16 * 1024) throw new Error('Invalid operation record');
-      return ledgerSchema.parse(JSON.parse(text));
+      return voiceOperationSchema.parse(JSON.parse(text));
     }
     catch { throw voiceError('OUTCOME_UNKNOWN'); }
   }
@@ -270,6 +275,7 @@ export class VoiceService {
   }
   /** 先写 fsync 的临时文件，再原子创建/替换；create-only claim 防止两个宿主同时 POST。 */
   private async saveOperation(path: string, operation: VoiceOperation, createOnly = false): Promise<boolean> {
+    if (this.options.operations) return this.options.operations.save(path.split(sep).at(-1)!.replace(/\.json$/, ''), operation, createOnly);
     await this.ensureDirectory(true);
     await this.checkRecord(path);
     const temporary = `${path}.${randomUUID()}.tmp`;

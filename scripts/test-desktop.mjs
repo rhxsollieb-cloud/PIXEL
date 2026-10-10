@@ -102,7 +102,7 @@ async function mouseViewerExport(page, expectedCount) {
 async function openLibraryWindow(page) {
   const opened = desktop.waitForEvent('window');
   await page.getByTestId('viewer').click({ button: 'right', position: { x: 120, y: 120 } });
-  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  await page.getByRole('menuitem', { name: '项目管理器', exact: true }).click();
   const library = await opened;
   await expect(library.getByTestId('library-window')).toBeVisible();
   return library;
@@ -140,7 +140,7 @@ try {
   const emptyLibraryWindow = desktop.waitForEvent('window');
   await emptyWorkspace.getByTestId('viewer').click({ button: 'right', position: { x: 120, y: 120 } });
   await expect(emptyWorkspace.getByRole('menuitem')).toHaveCount(1);
-  await emptyWorkspace.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  await emptyWorkspace.getByRole('menuitem', { name: '项目管理器', exact: true }).click();
   const emptyLibrary = await emptyLibraryWindow;
   await expect(emptyLibrary.getByTestId('library-window')).toBeVisible();
   await expect(emptyLibrary.getByTestId('asset-library')).toContainText('拖入素材');
@@ -151,7 +151,7 @@ try {
     return windows.length === 2 && windows.every(window => !window.isModal() && !window.getParentWindow() && window.isEnabled());
   }), true);
   await emptyWorkspace.getByTestId('viewer').dispatchEvent('contextmenu', { clientX: 200, clientY: 200 });
-  await expect(emptyWorkspace.getByRole('menuitem', { name: '素材库', exact: true })).toBeVisible();
+  await expect(emptyWorkspace.getByRole('menuitem', { name: '项目管理器', exact: true })).toBeVisible();
   await emptyWorkspace.keyboard.press('Escape');
   const emptyLibraryClosed = emptyLibrary.waitForEvent('close');
   await emptyLibrary.keyboard.press('Escape').catch(error => { if (!emptyLibrary.isClosed()) throw error; });
@@ -302,7 +302,7 @@ try {
   await workspace.getByRole('button', { name: '还原窗口', exact: true }).click();
   const libraryWindow = desktop.waitForEvent('window');
   await workspace.getByTestId('viewer').click({ button: 'right', position: { x: 120, y: 120 } });
-  await workspace.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  await workspace.getByRole('menuitem', { name: '项目管理器', exact: true }).click();
   const libraryPage = await libraryWindow;
   await expect(libraryPage.getByTestId('library-window')).toBeVisible();
   await expect(libraryPage.getByRole('dialog')).toHaveCount(0);

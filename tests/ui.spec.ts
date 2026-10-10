@@ -113,7 +113,7 @@ test('素材库是独立非模态工作窗口，空预览与键盘入口不锁�
   await page.getByTestId('viewer').focus();
   const next = page.waitForEvent('popup');
   await page.getByTestId('viewer').press('Shift+F10');
-  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  await page.getByRole('menuitem', { name: '项目管理器', exact: true }).click();
   const reopened = await next;
   await expect(reopened.getByTestId('library-window')).toBeVisible();
   await reopened.close();
@@ -527,7 +527,7 @@ async function openLibrary(page: Page): Promise<Page> {
   await page.getByTestId('viewer').click({ button: 'right' });
   await expect(page.getByRole('menuitem')).toHaveCount(1);
   const popup = page.waitForEvent('popup');
-  await page.getByRole('menuitem', { name: '素材库', exact: true }).click();
+  await page.getByRole('menuitem', { name: '项目管理器', exact: true }).click();
   const library = await popup;
   await expect(library.getByTestId('library-window')).toBeVisible();
   await expect(library.getByTestId('asset-library')).toBeVisible();
@@ -757,7 +757,7 @@ test('系统文件拖入主窗口走项目入口，浏览器开发版阻止误�
   // Nested timeline handlers cannot reinterpret an OS file drop as item placement.
   await page.getByTestId('timeline-track').first().dispatchEvent('dragover', { dataTransfer: transfer });
   await page.getByTestId('timeline-track').first().dispatchEvent('drop', { dataTransfer: transfer });
-  await expect(page.locator('.workspace-feedback')).toContainText('请使用桌面版拖入项目文件或文件夹');
+  await expect(page.locator('.workspace-feedback')).toContainText('请使用桌面版导入旧项目目录');
   expect(page.url()).toBe('http://127.0.0.1:4320/');
   expect(imports).toBe(0);
   expect(await snapshot(page)).toEqual(before);

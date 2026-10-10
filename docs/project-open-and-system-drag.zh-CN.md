@@ -1,87 +1,62 @@
-# 项目打开与系统拖拽
+# 共享项目输入、会话切换与系统拖拽
 
-更新日期：2026-10-10。项目打开原实现基于 1.4，现遵循[设计哲学 1.7](design-philosophy.zh-CN.md)及[核心架构](core-architecture.zh-CN.md)。保留已有项目拖入路径、默认 Viewer + Timeline 和空项目规则。1.5 新增系统媒体直接放置普通时间线，详见[本地时间线与扩展边界](local-timelines-and-extension.zh-CN.md)；1.7 生产资源统一为 Seafile，普通媒体轨新增右键文件选择器及生成视频人工输出，详见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。项目打开仍只有原路径。
+更新日期：2026-10-10。当前遵循[设计哲学1.8](design-philosophy.zh-CN.md)及[核心架构](core-architecture.zh-CN.md)。1.8按用户明确要求取消本地项目文件系统；旧1.4–1.7的“原目录持续保存”和“空目录补写项目”已被只读迁移替代。当前项目管理、工程包和恢复规范见[共享项目管理与工程包](shared-project-manager-and-packages.zh-CN.md)。
 
-## 项目位置与唯一入口
+## 对象与固定入口
 
-用户将本机项目文件或文件夹拖入桌面主工作窗口，即进入该位置的项目。空文件夹也是项目容器：因为其中还没有项目，在该位置初始化为空项目再打开。已有容器与空容器共用进入语义，区别来自实际文件内容，不来自修饰键、模式或弹出选项。
+Viewer 右键 → 项目管理器是唯一管理导航，空预览和已有输出均可。管理器为共同窗口宿主的非模态工作窗口，显示共享项目列表、名称创建、打开、导入、整项目/单轨导出和哈希恢复，保留当前素材/分组及跨窗口关系。项目打开通过可信宿主按共享Project ID切换运行时，不由前端编辑旧快照伪造。
 
-| 拖入内容 | 主窗口结果 | 对原文件的影响 |
+| 输入 | 结果 | 原件及执行边界 |
 | --- | --- | --- |
-| 已有 Pixel 项目目录 | 校验后在原目录打开 | 后续编辑继续保存至原目录，不复制到默认项目或合并内容 |
-| Pixel `project.json` | 打开该文件所在项目目录 | 使用现有项目及任务记录，并验证绑定的 Seafile 素材 |
-| 真正的空文件夹 | 在该目录创建空项目并打开 | 原子创建 `project.json`；随机项目 ID，标题采用文件夹名称，无预置时间线、片段和素材 |
-| 非空普通文件夹 | 明确拒绝 | 不递归导入媒体，不补写项目文件 |
-| 未知文件、普通 JSON、空文件 | 明确拒绝 | 不把任意文件改写成项目 |
-| 无法读取、版本不支持或结构不完整的项目 | 明确拒绝 | 保留原内容，不用空项目覆盖 |
+| 共享项目列表“打开项目” | 校验共享状态，获取单宿主lease后进入 | 不复制为本地可写项目，不允许其他活跃宿主覆盖 |
+| 名称表单“创建共享项目” | 新建空Seafile项目，在列表打开 | 没有示例时间线/片段/素材，没有本地project.json |
+| .pixel.zip通过管理器picker或项目列表drop | 同一服务校验媒体/清单后导入新共享ID | 保留包，清可执行记录，不合并也不启动生成，随后明确打开 |
+| .pixel.zip拖入桌面主窗口根 | 同一导入后进入新共享项目 | picker/drop有限等价触发，按固定来源和目标判断 |
+| 旧Pixel目录或project.json拖入桌面主窗口 | 只读迁移到新共享项目后进入 | 源路径及完整项目/任务摘要映射目的UUID；保留原件，不再保存原目录 |
+| 真正空文件夹拖入桌面主窗口 | 用目录名称创建空共享项目 | 不在空目录创建project.json，不授予持续存储权 |
+| 普通非空目录、未知/空文件、结构/插件版本无效项目 | 明确拒绝并保留当前会话 | 不猜测素材合并、不覆盖原文件 |
 
-一次只打开一个项目位置。当前对象详情隔离主窗口时，不借外部 drop 绕过隔离。浏览器开发版无法可靠取得可信本机目录路径，因此项目 File / 目录打开提示使用桌面版并阻止文件触发页面导航；库的媒体上传与 1.5 普通媒体轨文件放置仍可使用。不存在通过“上传目录”冒充已经在本机原位置打开项目的兼容路径。
+浏览器源码调试可按字节导入工程包，不能获得可信本机目录位置。旧目录迁移和共享会话切换由桌面宿主处理，调试界面明确说明边界；不新增Pixel网页部署服务。详情仍隔离所属窗口，文件drop不能越过顶部作用域。
 
-## 文件格式与共同校验
+## 严格校验及只读迁移
 
-项目文件沿用 `FileWorkbenchRepository` 已有持久化信封：`version`、`snapshot`、`requests`、`history`、`outbox`。它不只是一个裸 `ProjectDocument`。1.7 的媒体和产物索引统一保存在应用配置绑定的 Seafile 资料库，任务 ledger 仍位于项目目录的 `jobs/`，声音资源操作也保留项目本地账本；复制 `project.json` 不代表目标拥有原任务记录或共享库访问权限。资源共享不等于多人同时编辑项目，也不会自动导入 Seafile 目录中的普通文件。
+旧持久化信封包括version、snapshot、requests、history及outbox；固定文件及任务读取共用validateWorkbenchProjectFile和插件/模型registry，真实路径与旧artifacts限制在来源容器，不读取其中.env或任意URL。新项目权威状态使用DurableWorkbenchRepository共同事务和Seafile不可变版本；File适配器只供测试与旧读取。
 
-旧项目的 `artifacts/` 只作为受控迁移来源：宿主上传媒体及产物索引，保留 Asset / artifact ID、文件句柄、项目 revision、历史及原文件，不删除旧资源。生产打开随后通过同一远程存储验证当前、历史、捕获请求和成功任务产物，不以本地文件代替缺失或不可达的 Seafile 资源。该资源迁移不等于项目 schema 版本迁移。
+importLegacyProject先校验旧文件与jobs，再按真实来源路径和完整项目/任务摘要创建持久迁移claim，映射新的共享Project UUID。不同路径或不同完整状态不能因旧default ID同名覆盖其他共享项目。Item/Asset/时间线ID、fileRef、历史和媒体内容保留；canonical媒体摘要由Seafile补齐，原文件不删除。重复同源同状态迁移复用原目的项目。
 
-`src/project-files.ts` 提供 `validateWorkbenchProjectFile()`、`readWorkbenchProjectFile()` 与 `preparePixelProjectLocation()`。正常重开和外部打开复用结构及业务校验：
+旧请求缓存和outbox清空；queued/running/cancelRequested转interrupted，保留远端providerTaskId并更新项目归属/输入指纹，不自动重放收费。原参考角色（如Wan first-frame）保留；没有可恢复远端ID时不能盲目重提。终态job和已中断job保留，旧声纹operation账本也迁入共享operations，仍独立于项目撤销历史。这不等于宿主/插件schema迁移器，未知版本保留源文件并拒绝。
 
-- 校验版本、严格字段、成员关系、时间区间、模型与插件版本、参数及设置、历史和回执归属。
-- 校验 outbox、任务归属、引用与成功产物，保留捕获请求与远端任务 ID。
-- 将素材句柄、Seafile 产物索引、媒体格式、长度及远程资源对应起来；拒绝缺失、空内容、大小不一致或不属于配置资料库的资源。
-- 本地只解析固定项目及任务文件，旧资源迁移校验受控真实路径；项目中的任意路径或符号链接不能读取目录外文件，素材 metadata 中的任意 URL 不授予网络访问。
-- 仅在项目文件缺失且目录确实为空时构造初始空快照。创建原子发布；校验与写入之间若已有文件出现，不覆盖它。
+工程包通过fflate ZIP32，限定manifest.json、project/project.json、UUID媒体路径；核验清单/字节数/SHA256及项目schema，拒绝重复/越界路径、ZIP64/DEFLATE、额外文件和可执行记录。ZIP和解压总量上限256MiB，文档16MiB，清单1万媒体。导入新Project ID/revision0/生成token，不带任务执行或收费副作用。
 
-不支持的宿主或插件版本保留原文件并拒绝打开。顺序迁移、缺失插件只读占位与修复工具仍待实现，不能将“能解析当前文件”描述为已经具备迁移能力。
+合法共享项目即使媒体移动或缺失仍可进入管理器，保留对象供扫描恢复。恢复只扫描配置库，先大小后完整内容SHA256，以独立locations ledger更新定位，不改AssetID或revision；索引损坏、配置/权限/服务故障明确报错，不回退本地。扫描上限1万目录/5万文件，未找到保留缺失状态。
 
 ## 拖拽适配边界
 
-| 来源 → 目标 | 适配器及结果 | 业务边界 |
+| 来源 → 目标 | 可信适配及结果 | 边界 |
 | --- | --- | --- |
-| 系统项目 File / 文件夹 → 主窗口根 | preload `openDroppedProject(file)` → 可信桌面宿主切换项目 | 只打开项目，不导入媒体、合并项目或建立对象引用 |
-| 系统媒体文件 → 素材库 | HTTP 上传 → 既有 `asset.import` Action | 素材属于当前项目；目录不作为空文件上传 |
-| 系统媒体文件 → 普通媒体时间线 / Timeline 空白区域 | `external.media` → DragRegistry → HTTP → `media.placeExternal` | 一次导入并放置，空白区域创建对应本地轨；不切项目、不生成、不猜引用或替换 |
-| 库 Asset / 主 Item → 另一工作窗口的合法对象目标 | 不透明 token → ObjectDragBroker → DragRegistry → 原 Action | 放置、引用、移动及复用保持既有角色和作用域，仍不支持跨项目复制 |
-| Viewer 当前媒体 → 窗口外 | Seafile 读取及完整性校验 → 会话临时文件 → ExportTickets → 原生 `webContents.startDrag` | 只导出真实单媒体副本，不提交关系 Action；会话关闭清理临时文件 |
+| 工程包 → 管理器项目列表/主窗口根 | 共同工程包导入服务，主窗口后续打开 | 数据包不是Asset，不运行旧生成 |
+| 旧项目File/目录 → 主窗口根 | preload实际File路径 → 固定IPC → 只读迁移 → 共享会话 | 不能从renderer传任意路径，原件不持续保存 |
+| 系统媒体 → 管理器当前素材区 | HTTP真实字节 → asset.import | 当前项目素材，目录不当文件上传 |
+| 系统媒体 → 普通Timeline/空白 | external.media → 原DragRegistry → media.placeExternal | 原子导入放置，不猜引用/替换，不切项目 |
+| 当前Asset/Item → 另一工作窗口合法目标 | 不透明token → ObjectDragBroker → 原DragRegistry/Action | 同项目真实放置/引用/复用，作用域与单次消费校验 |
+| Viewer当前单媒体 → 外部窗口 | Seafile核验 → 临时副本 → ExportTicket → startDrag | 真实单媒体，不冒充多轨成片；关闭清理 |
 
-主窗口在 capture 阶段处理系统 Files drop，避免时间线的对象 drop handler 抢占。内部对象 MIME 与系统 Files 分开判定；对象 token 仍需来源、当前项目、对象存在性及作用域校验。素材库明确拒绝目录，不把主窗口打开项目的能力复制到库中。
+capture判别系统Files与对象MIME，防止对象handler抢占工程包或浏览器导航。桌面preload只接收实际drop的File，webUtils.getPathForFile取可信宿主路径；JS构造File/字符串不授权访问。主进程检查sender/窗口/项目作用域，原生票据仍绑定可信窗口、资产、有效期及单次消费，不给renderer任意文件系统API。
 
-preload 只接收实际 drop 的 `File`，用 Electron `webUtils.getPathForFile()` 获得宿主路径，再走固定 IPC channel。JS 构造的 File 没有本机路径，字符串也不授权文件访问；renderer 不接收任意文件系统 API 或项目目录路径。主进程校验 sender 属于当前主窗口，路径由后端位置适配器重新校验。
+## 会话、端口及晚到请求
 
-Viewer 提前通过统一媒体存储从 Seafile 校验下载真实媒体，只有会话临时副本可用后才允许拖出；临时文件不成为本地资源库，关闭会话时清理。导出票据绑定窗口、资产句柄和有效期，单次消费；临时文件消失、变为空内容、被替换成目录或链接时不能变成系统拖出。准备过程中会话若被撤销，迟到结果不能签发旧项目票据。拖出仍只支持当前单个媒体，整条时间线合成导出没有因此完成。
+共享项目state、history/receipts/outbox、jobs与声纹operation都在Seafile；本机last-project.json只记最近共享ID，旧version1目录记录仅作只读迁移输入。源码.env来自应用目录，打包版来自应用数据目录，项目不能覆盖凭证。
 
-## 会话切换与晚到请求
+桌面服务监听统一在FIREWALL_OPEN_PORT_RANGE=12000-12100、PORT_RANGE_START=12000、PORT_RANGE_END=12100分配；指定越界端口在存储/SDK初始化前拒绝，范围用尽明确失败。仍只绑定loopback并校验origin/Cookie，没有新增网页部署服务，不更改出站供应商URL。Seafile文件下载/上传入口可用SEAFILE_FILE_SERVER_URL显式映射旧内部origin，仅接受已配置来源或API同hostname，文件服务不接账户token。
 
-项目打开是可信宿主选择当前权威项目的操作，不能通过编辑旧项目的 Action 伪造切换。GUI 的唯一项目路径在共同路径表登记；打开完成后，领域编辑和媒体导入仍通过同一 Workbench / ActionExecutor。
+SharedProjectLease为每项目一个编辑/生成宿主，120秒期限、20秒续租；在Workbench.initialize消费outbox前启动续租/过期守卫，每秒检查本机已确认到期并close/abort，付费调用前再检查lease。一个宿主多个非模态窗口并行，团队可同时编辑不同项目，不宣称同项目实时多人自动合并。初始化失败清同一管线并释放lease，退出等待任务中断/持久化后释放。
 
-桌面先校验目标位置并创建新项目运行时，再撤销旧 broker 和导出票据、关闭旧详情及素材库。绑定新项目的随机 loopback 端口与新 HttpOnly Cookie，将主窗口导航至新 origin；导航成功前保留旧运行时，以便加载失败时恢复旧项目及 Cookie。导航成功后才关闭旧 Workbench 和 server，保存任务中断及仓库提交，结束旧连接。切换期间拒绝再次打开和原生拖出；新页面可提前准备只读导出票据。退出会等待正在准备的运行时完成或清理，避免后台服务遗留。
+切换先准备新运行时，再撤销旧broker/导出票据、关闭详情与管理器，将主窗口导航到新的范围内loopback origin和Cookie；导航失败恢复旧运行时，成功后关闭旧Workbench/server/连接并释放旧lease。GET /api/session动态身份重建前端投影/导航/字段/播放局部状态，旧请求仍去旧会话，不能借晚到结果编辑新项目。文件上传与导出准备继承session关闭守卫。
 
-`GET /api/session` 返回当前项目 ID 和不作为认证凭证的 session ID。App 根据该身份创建 Workbench 视图、ActionClient、ProjectProjectionStore、导航及窗口局部状态，移除固定项目 ID 假设。选择、播放指针、字段草稿、菜单、拖拽预览和详情路径不带入新会话；Scrub / Resize 的窗口监听器及旧拖拽会话也结束。素材上传带捕获的项目 ID，服务端校验；旧请求继续指向旧 origin，不能借晚到响应编辑新项目。导出准备和前端异步完成同样受会话关闭守卫保护。
+## 设计哲学第10节评审与验证
 
-成功打开的目录保存至 `%APPDATA%/Pixel/last-project.json`，属于宿主状态。下次启动尝试继续该位置；目录不存在、不可读或不再是合法项目时回退默认项目目录。此记录不是项目领域数据，也不含模型凭证。模型及 Seafile `.env` 从应用配置位置读取：源码版为仓库配置，打包版为应用数据目录配置；项目中的 `.env` 不能覆盖它。资源服务配置错误或不可达时明确失败，不回退本地媒体存储。
+对象是共享Project、可编辑包及既有Asset定位；管理器固定控件与Viewer导航登记单路径，文件导入等价触发有限记录。旧原位置打开改为只读迁移，是明确用户要求的1.8覆盖；普通媒体/对象关系不改变含义。非模态窗口及所属详情隔离保持，GUI编辑仍共用Action，目录/包/恢复服务复用领域校验。项目权威只在Seafile，recent ID与临时副本不是第二份状态；publication、lease、attempt/token及独立origin保护竞争/取消/晚到请求。包复用Timeline时钟，不新增渲染器或本地文件系统，完整§10评审见[1.8专文](shared-project-manager-and-packages.zh-CN.md)。
 
-## 生成任务不会因文件打开而自动收费
+1.8真实Seafile与原生共享项目验证已通过：范围端口、创建/打开/重开、并发publication单winner、整包导入重复请求、真实move/rename后的SHA256恢复，以及整包/文本单轨原生下载解码，确认原revision、时间/正文/历史和本地无project.json；独立fixture清理。类型/核心/UI/原生精确记录见[当前验证](shared-project-manager-and-packages.zh-CN.md)。1.4阶段129核心/17浏览器、1.5阶段152/19及1.7阶段218/36仅历史证据，不能冒充新功能验证。
 
-外部打开的目标项目有任何未完成 outbox，或 queued / running / cancelRequested 任务时，明确拒绝并保留原文件。用户应在其原会话完成或取消任务，不能把打开一个项目当成再次提交外部模型请求。
-
-interrupted 记录可以随项目打开，其捕获请求和 providerTaskId 保留。继续远端任务仍通过 Item 右键显式恢复，沿用已有 runner 与结果守卫；没有远端任务 ID 不盲目重新提交。切换离开的旧项目由 shutdown 持久化中断状态，不假装已经终止供应商任务或撤销计费。
-
-## 项目打开阶段的设计哲学第 10 节评审记录
-
-1. 对象是本机 Project 容器，唯一入口是文件或目录拖入主窗口根。空目录初始化与已有项目打开属于进入同一容器的状态处理，不增加按钮、菜单、选择模式或合并路径。
-2. 系统拖拽通过来源和目标表达确定动作。主窗口打开项目、库导入媒体、窗口内对象关系和 Viewer 拖出各有固定含义；不同 Action 名称不能复制入口。
-3. 默认界面保持 Viewer + Timeline，打开状态和错误仅在相关操作中出现。详情仍隔离所属窗口，项目打开不能绕过它；独立库继续非模态。
-4. 项目切换由可信宿主处理位置与生命周期，领域编辑及导入保持共享 Action 和校验。正式项目 CLI / Agent 适配器仍待接线，不用诊断命令冒充新项目 GUI。
-5. 项目权威状态仍只有后端一份；前端按会话重建只读投影。最近位置属于宿主记录，UI 导航和播放状态不写入项目。
-6. 文件校验复用模型注册表及插件 schema，插件不访问文件、不创建自己的 drop handler 或样式系统。
-7. 新 origin、Cookie、动态身份与关闭守卫阻断旧编辑、drag token、导出票据及迟到响应。未完成目标任务拒绝外部打开，恢复不自动收费；失败保留原项目文件。
-8. 只增加实际缺失的项目位置适配器和宿主会话切换，复用文件工作台、单窗口宿主、Action 和任务 ledger，不引入第二套存储或调度框架。
-
-项目打开阶段保持基线 1.4，产品标准路径只补足容器语义。后续按用户要求增加系统媒体直接放置 Timeline，已同步为 1.5；取舍与评审见[本地时间线与扩展边界](local-timelines-and-extension.zh-CN.md)。1.7 的普通媒体选择器与文件拖入共用 `media.placeExternal`，人工视频输出只走 Item 详情，资源统一 Seafile；其局部入口例外及存储评审见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。README、设计哲学、核心架构及桌面说明同步当前完成状态。
-
-## 验证与当前限制
-
-项目打开阶段的类型检查、129 项核心测试及 17 项浏览器交互测试通过。新增浏览器用例覆盖项目 File 不误入 Timeline / 素材导入、素材库拒绝目录、非默认项目身份的投影与命令；既有窗口间放置、引用、复用、局部详情隔离和媒体预览回归继续通过。核心用例验证项目结构、空目录、原位置重开、任务和媒体完整性、不支持输入及原文件保留，以及桌面 HTTP 会话和跨项目媒体上传隔离。`scripts/test-desktop.mjs` 已通过源码桌面构建与原生验证：中文带空格的空目录初始化，已有目录内 project.json 原位置重开，切换前后库窗口、origin、对象 token 和导出票据撤销，真实磁盘媒体导入、跨窗口放置、Viewer 鼠标导出正确路径，以及退出重启继续最近项目。注入原生导航失败后确认旧项目快照、origin、认证仍可用且失败候选服务关闭；重开带输出的项目可立即准备并鼠标拖出文件。1.5 新增媒体轨和文本参考后的 152 项核心、19 项浏览器及原生最终验证见[本地时间线与扩展边界](local-timelines-and-extension.zh-CN.md)。
-
-自动化的原生系统输入采用 Chromium / CDP 投放真实磁盘 File；Viewer 用真实鼠标触发 startDrag 并检查宿主提供正确文件。这与 JS 构造 File、直接诊断调用不同，但仍不能证明 Windows Explorer 与任意外部应用之间完整屏幕坐标拖拽已经自动化验证。内部对象的原生跨窗口测试保留真实鼠标起拖及 Chromium 目标投放的边界。
-
-项目打开阶段的测试不调用付费模型，构建和运行源码桌面，Windows 可执行文件未重新打包；上述数字为历史证据，1.7 当前验证见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)。旧资源向 Seafile 迁移和实时多轨叠加播放已完成，项目 schema 迁移、缺失插件占位、完整撤销重做、多人项目协作、离线混音及合成文件导出仍待实现。
+原生系统输入自动化使用真实磁盘File加Chromium/CDP投放，Viewer由真实鼠标触发startDrag；不宣称已自动化Windows Explorer与任意外部应用的完整屏幕坐标拖拽。模型/声音回归使用模拟服务，未付费生成，本轮源码构建而未重新打包。正式项目CLI/Agent编辑、插件迁移/缺失插件占位、完整undo/redo、实时多人合并和离线成片合成仍待实现。

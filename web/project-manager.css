@@ -1,0 +1,21 @@
+.project-manager{display:grid;grid-template-columns:216px minmax(0,1fr);gap:24px;min-height:100%;padding:20px}
+.project-manager__projects{display:flex;flex-direction:column;gap:12px;border-right:1px solid var(--pixel-line);padding-right:20px;min-width:0}
+.project-manager__heading{color:var(--pixel-ink);padding-bottom:8px;border-bottom:1px solid var(--pixel-line)}
+.project-manager__hint{color:var(--pixel-muted);overflow-wrap:anywhere}
+.project-manager__project-list{display:flex;flex-direction:column;gap:12px;max-height:320px;overflow:auto}
+.project-manager__project{display:flex;flex-direction:column;gap:4px;padding:12px;border:1px solid var(--pixel-line);background:var(--pixel-surface)}
+.project-manager__project>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-manager__project.is-current{border-color:var(--pixel-pink);background:var(--pixel-pink-soft)}
+.project-manager__new{display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--pixel-line)}
+.project-manager__current{min-width:0}
+.project-manager__exports,.project-manager__recovery{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:12px 0}
+.project-manager__timeline{display:flex;align-items:center;gap:8px;min-width:0}
+.project-manager__timeline>span{white-space:nowrap;flex-shrink:0}
+.project-manager__timeline select{max-width:180px}
+.manager-button{border:1px solid var(--pixel-line);background:var(--pixel-surface-muted);color:var(--pixel-ink);padding:8px 12px;font:inherit;cursor:pointer}
+.manager-button:hover:enabled{background:var(--pixel-pink-soft);border-color:var(--pixel-pink)}
+.manager-button:disabled{opacity:.5;cursor:default}
+.project-manager .context-library{padding:16px 0}
+.project-manager .asset-groups{grid-template-columns:128px minmax(0,1fr);gap:12px}
+.project-manager .asset-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr))}
+@media(max-width:760px){.project-manager{grid-template-columns:172px minmax(0,1fr);gap:12px;padding:12px}.project-manager__projects{padding-right:12px}.project-manager .asset-groups{grid-template-columns:104px minmax(0,1fr)}}

@@ -1,6 +1,6 @@
 # Pixel
 
-本地运行的像素风生成创作工作台。默认界面只有 Viewer 与 Timeline；双击进入对象、右键执行命令、拖拽建立关系。时间轴左侧单击进入默认配置，修改保留已有片段，右键“刷新时间轴默认配置”才应用到已有片段。素材库的唯一入口是主 Viewer 右键 → 素材库，空预览或已有输出均可进入。主工作区与素材库使用共同窗口宿主，非模态并行；对象详情只隔离所属窗口。打开素材库仅改变窗口导航，不提交业务 Action。
+像素风生成创作桌面工作台。默认 Viewer 与 Timeline，统一12px字体和像素组件；时间轴左侧单击默认配置，已有片段保留原值，右键刷新才应用。Viewer 右键 → 项目管理器是唯一管理入口，独立非模态窗口保留素材分组及跨窗口关系；项目标题双击只进入详情。
 
 Eleven v4 已通过官方 Dialogue SDK 接入相邻文本参考及时间戳裁尾，具体规则与基类补齐说明见[默认配置与语音连续性升级](docs/timeline-defaults-and-speech.zh-CN.md)。
 
@@ -10,11 +10,11 @@ Eleven v4 的默认配置详情现在直接显示声音选择、克隆音频文�
 
 生成视频片段详情直接提供“上传生成结果”：选择人工上传或外部网页生成来源，上传单个不超过 256 MiB 的 MP4 作为这个片段的输出，保留提示词、模型与时间位置。上传成功取消旧任务并阻止晚到结果覆盖；参数修改和默认配置刷新仍保留人工输出。它不上传模型参考，也不调用生成 API。源视频较短时缩短片段，较长时保留原编辑区间，可再拖动片段边缘使用更多内容。
 
-生产资源统一保存至 `.env` 配置的 Seafile 资料库：媒体和产物索引共享，后端代理预览与受控读取，没有本地媒体存储回退。旧项目资源迁入 Seafile 时保留原句柄和原文件；项目 JSON、编辑历史、生成与声纹账本仍位于项目目录，资源共享不等于多人同时编辑项目。原生文件拖出只使用会话临时副本，退出后清理。1.7 的契约、配置与验证见[共享资源与人工输出](docs/shared-resources-and-manual-output.zh-CN.md)。
+生产项目及资源全部保存在应用 .env 配置的 Seafile：项目状态、历史、回执、outbox、生成任务和声纹操作记录共享持久化，媒体与索引独立，没有本地项目/资源回退。同项目只有一个编辑/生成宿主，多窗口同宿主并行，团队可编辑不同项目；不宣称实时多人合并。旧项目按源路径及项目/任务摘要只读迁移至新共享UUID、保留原件，旧未完成任务转 interrupted，不自动收费重放。见[共享项目、工程包与哈希恢复](docs/shared-project-manager-and-packages.zh-CN.md)。
 
-素材库可新建、改名和删除分组，每个素材通过分组字段归入一个组，并支持“全部素材”和“未分组”筛选；删除组保留素材及原始文件。时间线左侧的 ↕ 把手使用 dnd-kit 排序并保存顺序，上层轨道作为前景。Viewer 使用 Remotion Player 在 1280×720、16:9、60 fps 画布上预览同一时刻的多轨图像、视频及并发音频，与时间指针共用播放位置；纯文本参考和未生成草稿不进入画面。Viewer 原生拖出仍导出当前单个 output 文件，多轨合成文件导出尚未实现。
+项目管理器直接显示共享项目列表、新建/打开及 .pixel.zip 导入；当前项目可导出整项目或选中时间线的可编辑工程包。project/、media/ 与 SHA256 清单分开，单包最多256 MiB；整包保留编辑历史及历史媒体，单轨保留原时钟/参数/引用；导入形成新项目并清可执行记录。媒体移动时项目仍可打开，“扫描哈希恢复媒体”在同一库找回真实内容，保留 Asset ID及片段关系。分组、dnd-kit 排序及 Remotion 1280×720/60fps 叠加播放继续使用同一投影；未实现渲染成片，Viewer 单媒体原生拖出保持原入口。
 
-外部 Agent 可读取文本参考：`npm run --silent timeline:text -- --project "C:\作品\项目" --format text`。改为 `--format json` 获取对象 ID、时间和版本；支持分页、时间及正文筛选，读取不加载模型凭证或修改项目。
+外部 Agent 可读取导出的项目文档或旧项目文本参考：`npm run --silent timeline:text -- --project "C:\作品\项目" --format text`。改为 `--format json` 获取对象 ID、时间和版本；支持分页、时间及正文筛选，读取不加载模型凭证或修改项目。
 
 ```sh
 npm install
@@ -25,7 +25,7 @@ Windows 可执行文件通过 `npm run package:win` 构建，输出在 `release/
 
 当前锁定的 `remotion` / `@remotion/player` 4.0.534 使用 Remotion License。按依赖中的 `LICENSE.md`，个人、最多 3 名雇员的营利机构及非营利机构符合免费资格，可以制作商业视频和图像；不符合免费资格的机构需要 Company License。免费条款另禁止为销售、出租或再许可自己的 Remotion 衍生品而复制或修改其代码；这不是 MIT 许可。完整条件以[官方 LICENSE](https://github.com/remotion-dev/remotion/blob/main/LICENSE.md)和当前锁定依赖的许可文本为准，升级版本时重新核对对应条款。
 
-Windows 源码版可双击[启动Pixel.cmd](启动Pixel.cmd)。启动后将空文件夹拖入主窗口，即在该目录创建并打开空作品；已有 Pixel 项目目录或 `project.json` 同样拖入，在原位置继续编辑。媒体文件拖入素材库，Viewer 当前输出可原生拖出。规则及系统边界见[项目打开与系统拖拽](docs/project-open-and-system-drag.zh-CN.md)。
+Windows 源码版可双击[启动Pixel.cmd](启动Pixel.cmd)。在 Viewer 右键进入项目管理器创建/打开共享项目，或导入可编辑工程包；工程包拖入主窗口会导入并打开新共享项目。旧 project.json/目录只读迁移到 Seafile；空目录只供命名，不在原目录创建项目文件。普通媒体仍按固定目标导入/放置。见[项目输入与系统拖拽](docs/project-open-and-system-drag.zh-CN.md)。
 
 先看 [设计哲学与架构约束](docs/design-philosophy.zh-CN.md)，理解产品基线；本轮理解与偏移修正见[哲学对齐记录](docs/philosophy-alignment.zh-CN.md)。再看 [核心架构设计](docs/core-architecture.zh-CN.md) 与代码。五个指定模型的配置、参数及执行边界见[模型接入文档](docs/model-integrations.zh-CN.md)。后续开发遵循 [仓库开发指引](AGENTS.md)，核心变更按设计哲学记录相关取舍。
 
@@ -41,9 +41,9 @@ Windows 源码版可双击[启动Pixel.cmd](启动Pixel.cmd)。启动后将空�
 | [src/voice-contracts.ts](src/voice-contracts.ts) / [voices.ts](src/voices.ts) / [elevenlabs-voices.ts](src/providers/elevenlabs-voices.ts) | 浏览器可读声纹契约、共享查询与克隆服务、独立账号资源回执和官方 SDK 适配 |
 | [src/reference-policy.ts](src/reference-policy.ts) | 模型引用的共同最小 / 最大数量规则 |
 | [web/asset-groups.tsx](web/asset-groups.tsx) / [composition-preview.tsx](web/composition-preview.tsx) | 素材分组字段和 Remotion 多轨预览；项目编辑继续经宿主 Action |
-| [src/runtime.ts](src/runtime.ts) / [storage.ts](src/storage.ts) | 任务执行/恢复、项目本地任务 ledger，以及测试和旧资源迁移使用的文件适配器 |
+| [src/runtime.ts](src/runtime.ts) / [storage.ts](src/storage.ts) | 任务执行/恢复、JobRepository执行/恢复与测试、旧项目只读迁移文件适配器 |
 | [src/seafile-storage.ts](src/seafile-storage.ts) / [resource-migration.ts](src/resource-migration.ts) / [media-export.ts](src/media-export.ts) | 生产共享媒体与产物索引、保留句柄的旧资源迁移，以及会话临时导出副本 |
-| [src/project-files.ts](src/project-files.ts) | 原位置项目校验、空目录初始化与模型、任务、素材完整性检查 |
+| [src/project-files.ts](src/project-files.ts) | 旧项目只读结构/模型/任务/资源校验；生产通过共享服务保存 |
 | [examples/move-clip.ts](examples/move-clip.ts) | 三种入口共用协议、重复提交只执行一次的示例 |
 | [examples/generate-media.ts](examples/generate-media.ts) | 模型查询与真实 SDK 的后端诊断 CLI |
 
@@ -70,4 +70,6 @@ npm run example
 
 `npm run models` 查询共享模型目录。后端从 `.env` 读取 `ELEVENLABS_API_KEY`、`OPENROUTER_API_KEY` 及 Seafile 配置；凭证不进入前端或项目。`npm run generate -- --model MODEL_ID --params-file params.json` 是后端诊断 CLI，会调用真实模型并将产物保存至 Seafile，可能产生费用；命令返回不透明媒体句柄，不返回本地媒体路径。它使用 `backend-example` 请求，直接调用生成执行内核，不是当前 GUI 项目的 Action 入口，也不将产物自动挂载到该项目。Eleven v4 参数必须提供可用 `voiceId`；Wan / Grok 的设置可用 `--settings-file settings.json` 传入。视频中断恢复使用 `npm run generate -- --resume JOB_ID`，详见模型接入文档。
 
-当前已具备 Electron 桌面宿主、React 工作台、文件项目持久化、五模型字段、四种本地轨道、只读文本投影、生成提交 / outbox / 受控结果挂载、声纹查询与克隆命令、素材分组、时间线排序、多轨实时预览、生成视频人工输出及 Seafile 共享资源，以及 Viewer 当前媒体的原生文件拖出。项目文件 / 目录打开与空目录初始化已接入，动态项目身份及独立 origin 保护会话切换。模型生成及声纹 SDK 验证使用模拟 HTTP，未调用真实计费服务，也不能据此证明账号权限或生成质量；克隆回执绑定完整输入和 API key 的凭证作用域哈希，改换密钥不能复用旧回执，超时或结果未知时不盲目重提。共同窗口宿主、非模态素材库与真实跨窗口对象 broker 已实现；浏览器开发版使用同源独立 popup（`?window=library`），复用同一 App / `PixelWindowHost`。1.6 历史记录见[声音、输入、分组与多轨预览](docs/voices-inputs-groups-and-composition.zh-CN.md)，1.7 当前记录见[共享资源与人工输出](docs/shared-resources-and-manual-output.zh-CN.md)。正式项目 CLI / Agent 编辑适配器、共享 Action 能力查询、完整撤销重做、项目版本迁移与缺失插件占位、多人项目协作、多轨合成文件导出仍按架构文档继续实现。继续源码开发模式，本轮未重新打包。
+当前具备共享项目事务、非模态项目管理器、五模型官方 SDK、普通媒体/文本轨、只读文本投影、声音及模型输入、分组/排序/叠加预览、人工视频输出、可编辑工程包和哈希恢复。生产不创建本地 project.json；本机只记最近共享 ID及有限处理/导出临时文件。真实 Seafile 与原生共享验证见[1.8记录](docs/shared-project-manager-and-packages.zh-CN.md)，旧轮数字仅历史证据。正式项目 CLI/Agent 编辑、共享 Action 能力查询、完整撤销重做、插件迁移/缺失插件占位、实时多人合并及离线成片合成仍待实现。本轮保持源码开发，未重新打包。
+
+桌面宿主监听统一从 FIREWALL_OPEN_PORT_RANGE=12000-12100、PORT_RANGE_START=12000、PORT_RANGE_END=12100 分配，保持 loopback/Cookie 安全边界。没有新增 Pixel 网页部署服务，不修改出站 Seafile、OpenRouter 或 ElevenLabs 地址。SEAFILE_FILE_SERVER_URL 可把服务返回的旧内部文件 origin 显式映射到外部入口，来源受配置或 API 同 hostname 限制，凭证不发文件服务。

@@ -119,6 +119,8 @@ export function createInteractionHost(projectId: string, getTypes: () => readonl
   drag.register({sourceRole:'external.media',targetRole:'asset-library',actionType:'asset.import',
     preview:()=>({status:'available'}),buildPayload:()=>({}),
   });
-  for(const [action,path] of [['item.params','field:item'],['timeline.settings','field:timeline'],['timeline.defaults','field:timeline-defaults'],['project.title','field:project'],['project.open','drag:external-project->workspace'],['voice.clone','detail:timeline-voice-clone'],['media.referenceExternal','detail:item-reference-upload'],['media.outputExternal','detail:item-output-upload'],['timeline.reorder','drag:timeline.sort'],['assetGroup.create','detail:library-group-create'],['assetGroup.rename','detail:library-group-rename'],['assetGroup.remove','detail:library-group-remove'],['assetGroup.moveAsset','field:asset-group']]) paths.claim(action!,path!);
+  for(const [action,path] of [['item.params','field:item'],['timeline.settings','field:timeline'],['timeline.defaults','field:timeline-defaults'],['project.title','field:project'],['voice.clone','detail:timeline-voice-clone'],['media.referenceExternal','detail:item-reference-upload'],['media.outputExternal','detail:item-output-upload'],['timeline.reorder','drag:timeline.sort'],['assetGroup.create','detail:library-group-create'],['assetGroup.rename','detail:library-group-rename'],['assetGroup.remove','detail:library-group-remove'],['assetGroup.moveAsset','field:asset-group']]) paths.claim(action!,path!);
+  for (const [action,path] of [['project.create','manager:project-create'],['project.open','manager:project-open'],['project.exportPackage','manager:project-export'],['timeline.exportPackage','manager:timeline-export'],['media.recover','manager:media-recover']]) paths.claim(action!,path!);
+  paths.claim('project.importPackage','manager:project-import');
   return {navigator,paths,menu,drag};
 }

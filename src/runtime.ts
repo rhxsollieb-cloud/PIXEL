@@ -1,13 +1,11 @@
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { OpenRouter } from '@openrouter/sdk';
 import type { DeepReadonly, GenerationJob, GenerationRequest } from './contracts.js';
 import { generationRequestSchema } from './contracts.js';
-import { BaseModelProvider, ProviderError, transitionJob, type GenerationProgress, type MediaArtifactStore } from './generation.js';
+import { BaseModelProvider, ProviderError, transitionJob, type GenerationProgress, type MediaArtifactStore, type JobRepository } from './generation.js';
 import { modelRegistry } from './models.js';
 import { ElevenLabsModelProvider } from './providers/elevenlabs.js';
 import { OpenRouterModelProvider } from './providers/openrouter.js';
-import { FileJobRepository } from './storage.js';
 import type { BackendConfiguration } from './backend-configuration.js';
 import { generationInputFingerprint } from './generation-fingerprint.js';
 export { loadBackendConfiguration, type BackendConfiguration } from './backend-configuration.js';
@@ -36,11 +34,26 @@ export interface RunGenerationOptions {
 
 /** 后端任务执行闭环；项目 Action 的 outbox 消费者复用它，UI 不直接持有 SDK。 */
 export class GenerationRunner {
+  readonly jobs: {
+    create: JobRepository['create'];
+    get(id: string): Promise<GenerationJob | undefined>;
+    list(states: readonly GenerationJob['state'][]): Promise<GenerationJob[]>;
+    update(guard: Parameters<JobRepository['update']>[0], mutate: Parameters<JobRepository['update']>[1]): Promise<GenerationJob | undefined>;
+  };
   constructor(
     readonly providers: ProviderRegistry,
-    readonly jobs: FileJobRepository,
+    jobs: JobRepository,
     readonly artifacts: MediaArtifactStore,
-  ) {}
+    private readonly authorizeExecution?: () => Promise<void>,
+  ) {
+    // Mutable snapshots here are detached copies; the repository port remains read-only.
+    this.jobs = {
+      create: job => jobs.create(job),
+      get: async id => { const value = await jobs.get(id); return value ? structuredClone(value) as GenerationJob : undefined; },
+      list: async states => structuredClone(await jobs.list(states)) as GenerationJob[],
+      update: async (guard, mutate) => { const value = await jobs.update(guard, mutate); return value ? structuredClone(value) as GenerationJob : undefined; },
+    };
+  }
 
   async run(request: DeepReadonly<GenerationRequest>, options: RunGenerationOptions = {}): Promise<GenerationJob> {
     const job = await this.enqueue(request);
@@ -110,6 +123,10 @@ export class GenerationRunner {
     const signal = options.signal ?? new AbortController().signal;
     try {
       job = await this.change(job, 'running');
+      // A durable remote transition may finish after the editing lease expired.
+      // Recheck the trusted host fence immediately before any provider call.
+      await this.authorizeExecution?.();
+      signal.throwIfAborted();
       const provider = this.providers.get(job.request.providerId);
       let progress = 0;
       const output = await provider.generate(job.request, {
@@ -161,12 +178,11 @@ export class GenerationRunner {
   }
 }
 
-export function createModelBackend(configuration: BackendConfiguration, artifacts: MediaArtifactStore): GenerationRunner {
+export function createModelBackend(configuration: BackendConfiguration, artifacts: MediaArtifactStore, jobs: JobRepository,
+  authorizeExecution?: () => Promise<void>): GenerationRunner {
+  if (!jobs) throw new ProviderError('INVALID_INPUT', '任务存储须由可信宿主明确提供');
   const providers = new ProviderRegistry();
   providers.register(new ElevenLabsModelProvider({ apiKey: configuration.elevenlabsApiKey }));
   providers.register(new OpenRouterModelProvider(new OpenRouter({ apiKey: configuration.openrouterApiKey })));
-  return new GenerationRunner(providers,
-    new FileJobRepository(join(configuration.storageDirectory, 'jobs')),
-    artifacts,
-  );
+  return new GenerationRunner(providers, jobs, artifacts, authorizeExecution);
 }

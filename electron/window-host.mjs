@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 const dimensions = {
   workspace: { width: 1480, height: 960, minWidth: 1040, minHeight: 720, title: 'Pixel' },
-  library: { width: 720, height: 760, minWidth: 480, minHeight: 400, title: 'Pixel · Media' },
+  library: { width: 1040, height: 820, minWidth: 700, minHeight: 480, title: 'Pixel · Projects' },
   detail: { width: 720, height: 760, minWidth: 520, minHeight: 420, title: 'Pixel · Detail' },
 };
 

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('pixelDesktop', Object.freeze({
   isDetailWindow: process.argv.includes('--pixel-window=detail'),
   isLibraryWindow: process.argv.includes('--pixel-window=library'),
   openDetails: launch => ipcRenderer.invoke('pixel:details-open', launch),
+  openSharedProject: projectId => ipcRenderer.invoke('pixel:project-open-shared', { projectId }),
   onDetailsClosed: callback => listen('pixel:details-closed', callback),
   openLibrary: () => ipcRenderer.invoke('pixel:library-open'),
   onLibraryClosed: callback => listen('pixel:library-closed', callback),

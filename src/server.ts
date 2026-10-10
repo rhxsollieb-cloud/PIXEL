@@ -1,14 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { createReadStream } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { realpath, stat, readdir, readFile } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { DomainError } from './backend.js';
 import { createWorkbench, type Workbench, type WorkbenchOptions } from './workbench.js';
 import { loadBackendConfiguration, loadSeafileConfiguration } from './backend-configuration.js';
 import { SeafileArtifactStore } from './seafile-storage.js';
-import { migrateLegacyArtifacts } from './resource-migration.js';
 import { preparePixelProjectLocation as prepareLocalProjectLocation } from './project-files.js';
 import { basename, dirname } from 'node:path';
 import { readWorkbenchProjectFile } from './project-files.js';
@@ -17,28 +16,58 @@ import { timelineRegistry } from './timeline-catalog.js';
 import { VoiceService, VoiceServiceError } from './voices.js';
 import { ElevenLabsVoiceProvider } from './providers/elevenlabs-voices.js';
 import { ProviderError } from './generation.js';
+import { SharedProjectCatalog, SharedJobRepository, SharedVersionedDocument, SharedProjectLease } from './shared-projects.js';
+import { FileJobRepository, FileArtifactStore } from './storage.js';
+import { voiceOperationSchema } from './voices.js';
+import { decodeProjectPackage, exportProjectPackage, importedPackageState, MAX_PROJECT_PACKAGE_BYTES, packageAssets } from './project-package.js';
+import { importLegacyProject } from './project-migration.js';
+import { loadHostPortRange, listenInRange } from './host-ports.js';
 export { FileArtifactStore } from './storage.js';
 /** Desktop project ingress uses the same remote resource authority as the running workbench. */
-export async function preparePixelProjectLocation(targetPath: string, options: { envPath?: string; artifacts?: import('./generation.js').MediaArtifactStore } = {}) {
+export async function preparePixelProjectLocation(targetPath: string, options: { envPath?: string; artifacts?: import('./generation.js').MediaArtifactStore } = {}): Promise<import('./project-files.js').PixelProjectLocation & { projectId?: string }> {
   if (typeof targetPath !== 'string' || !isAbsolute(targetPath) || targetPath.includes('\0')) throw new DomainError('INVALID_INPUT', '项目位置必须是有效的本地绝对路径');
   const target = await realpath(targetPath);
   const info = await stat(target);
-  if (!info.isDirectory() && (!info.isFile() || basename(target).toLowerCase() !== 'project.json')) throw new DomainError('INVALID_INPUT', '请拖入 Pixel 项目目录、project.json 或空文件夹');
+  const archive = info.isFile() && basename(target).toLowerCase().endsWith('.pixel.zip');
+  if (!info.isDirectory() && (!info.isFile() || (!archive && basename(target).toLowerCase() !== 'project.json'))) throw new DomainError('INVALID_INPUT', '请拖入 Pixel 工程包、旧项目目录或 project.json');
   const directory = info.isDirectory() ? target : dirname(target);
-  try { await readWorkbenchProjectFile(directory, { externalOpen: true, validateResources: false }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return prepareLocalProjectLocation(targetPath); throw error; }
+  let legacy;
+  let decoded;
+  if (archive) {
+    if (info.size > MAX_PROJECT_PACKAGE_BYTES) throw new DomainError('INVALID_INPUT', '工程包超过 256 MB 上限');
+    decoded = decodeProjectPackage(await readFile(target));
+  } else {
+    try { legacy = await readWorkbenchProjectFile(directory, { validateResources: false }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (!info.isDirectory() || (await readdir(directory)).length) throw new DomainError('INVALID_INPUT', '目录不是 Pixel 项目；请导入工程包或旧项目目录');
+    }
+  }
   const artifacts = options.artifacts ?? await SeafileArtifactStore.open(await loadSeafileConfiguration(options));
-  if (artifacts instanceof SeafileArtifactStore) await migrateLegacyArtifacts(directory, artifacts);
-  return prepareLocalProjectLocation(targetPath, { mediaStore: artifacts });
+  if (!(artifacts instanceof SeafileArtifactStore)) return prepareLocalProjectLocation(targetPath, { mediaStore: artifacts });
+  const projects = new SharedProjectCatalog(artifacts);
+  let projectId: string;
+  if (decoded) {
+    for (const entry of decoded.artifacts) await artifacts.importArtifact(entry.artifact, entry.bytes);
+    const state = importedPackageState(decoded.state);
+    projectId = await projects.create(state.snapshot.document.title, state.snapshot.document.id, state);
+  } else if (legacy) {
+    projectId = await importLegacyProject(directory, artifacts, projects, legacy);
+  } else projectId = await projects.create(basename(directory));
+  return { directory, projectId, existing: Boolean(legacy) };
 }
 
 export interface ApiOptions {
   frontendPort?: number;
+  /** Trusted development host supplies its actual loopback renderer listener. */
+  getFrontendPort?: () => number;
   apiPort?: number;
   /** Desktop hosts serve their compiled renderer from this directory. */
   frontendDirectory?: string;
   /** Trusted desktop host installs this opaque value as an HttpOnly session cookie. */
   sessionToken?: string;
+  projects?: SharedProjectCatalog;
+  projectId?: string;
 }
 const desktopCookie = 'pixel_desktop_session';
 const staticTypes: Record<string, string> = {
@@ -127,7 +156,7 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
     void (async () => {
       const address = server.address();
       const apiPort = typeof address === 'object' && address ? address.port : options.apiPort ?? 4311;
-      if (!trustedOrigin(request, apiPort, frontendPort)) { json(response, 403, { ok: false, error: { code: 'FORBIDDEN', message: '请求来源不在本地工作台范围内' } }); return; }
+      if (!trustedOrigin(request, apiPort, options.getFrontendPort?.() ?? frontendPort)) { json(response, 403, { ok: false, error: { code: 'FORBIDDEN', message: '请求来源不在本地工作台范围内' } }); return; }
       if (!hasDesktopSession(request, options.sessionToken)) { json(response, 403, { ok: false, error: { code: 'FORBIDDEN', message: '桌面会话无效' } }); return; }
       const url = new URL(request.url ?? '/', `http://127.0.0.1:${apiPort}`);
       if (request.method === 'GET' && url.pathname === '/api/session') {
@@ -137,6 +166,76 @@ export function createApiServer(workbench: Workbench, options: ApiOptions = {}):
         if (await serveFrontend(request, response, url.pathname, options.frontendDirectory)) return;
       }
       if (request.method === 'GET' && url.pathname === '/api/project') { json(response, 200, await workbench.snapshot()); return; }
+      if (request.method === 'GET' && url.pathname === '/api/projects') {
+        if (options.projects) json(response, 200, { ...await options.projects.list({ ...(url.searchParams.has('cursor') ? { cursor: url.searchParams.get('cursor')! } : {}), limit: 20 }), shared: true });
+        else { const snapshot = await workbench.snapshot(); json(response, 200, { shared: false, items: [{ id: workbench.projectId, title: snapshot.document.title, revision: snapshot.revision, timelineCount: Object.keys(snapshot.document.timelines).length, assetCount: Object.keys(snapshot.document.assets).length }] }); }
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/projects') {
+        if (!options.projects) throw new DomainError('NOT_APPLICABLE', '当前测试宿主未连接共享项目目录');
+        const input = JSON.parse(new TextDecoder().decode(await bytes(request, 4096))) as { title?: unknown; requestId?: unknown };
+        if (typeof input.title !== 'string' || typeof input.requestId !== 'string' || !/^[a-f0-9-]{36}$/.test(input.requestId)) throw new DomainError('INVALID_INPUT', '项目名称或请求编号无效');
+        try { await options.projects.create(input.title, input.requestId); }
+        catch (error) {
+          if (!(error instanceof DomainError && error.code === 'REVISION_CONFLICT')) throw error;
+          const existing = await options.projects.state(input.requestId);
+          if (existing.snapshot.document.title !== input.title.trim()) throw error;
+        }
+        json(response, 200, { id: input.requestId }); return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/project/export') {
+        const controller = new AbortController(); response.once('close', () => controller.abort());
+        const timelineId = url.searchParams.get('timelineId') ?? undefined;
+        const archive = await exportProjectPackage(await workbench.repository.exportState(), workbench.artifacts, controller.signal, timelineId);
+        response.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': archive.length, 'Content-Disposition': `attachment; filename="${timelineId ? 'timeline' : 'project'}.pixel.zip"`, 'Cache-Control': 'no-store' });
+        response.end(archive); return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/projects/import') {
+        if (!options.projects || !(workbench.artifacts instanceof SeafileArtifactStore)) throw new DomainError('NOT_APPLICABLE', '工程包导入需要共享存储');
+        const controller = new AbortController(); response.once('close', () => controller.abort());
+        const archive = await bytes(request, MAX_PROJECT_PACKAGE_BYTES);
+        const decoded = decodeProjectPackage(archive);
+        const id = scalarHeader(request, 'x-pixel-request');
+        if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(id)) throw new DomainError('INVALID_INPUT', '工程包请求编号无效');
+        const sha256 = createHash('sha256').update(archive).digest('hex');
+        const claim = new SharedVersionedDocument(workbench.artifacts, `operations/import-${id}`, value => {
+          const record = value as { sha256: string; projectId: string };
+          if (typeof record?.sha256 !== 'string' || record.projectId !== id) throw new DomainError('INVALID_INPUT', '工程包导入记录无效');
+          return record;
+        });
+        let claimed = await claim.read();
+        if (!claimed) {
+          try { await claim.publish(undefined, { sha256, projectId: id }); }
+          catch (error) { claimed = await claim.read(); if (!claimed) throw error; }
+          claimed ??= await claim.read();
+        }
+        if (claimed?.value.sha256 !== sha256) throw new DomainError('REQUEST_ID_REUSED', '同一请求编号不能用于不同工程包');
+        try { const existing = await options.projects.state(id); json(response, 200, { id, title: existing.snapshot.document.title }); return; }
+        catch (error) { if (!(error instanceof DomainError && error.code === 'NOT_FOUND')) throw error; }
+        for (const entry of decoded.artifacts) await workbench.artifacts.importArtifact(entry.artifact, entry.bytes, controller.signal);
+        const state = importedPackageState(decoded.state, id);
+        try { await options.projects.create(state.snapshot.document.title, id, state); }
+        catch (error) { if (!(error instanceof DomainError && error.code === 'REVISION_CONFLICT')) throw error; await options.projects.state(id); }
+        json(response, 200, { id, title: state.snapshot.document.title }); return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/project/media-status') {
+        const missing: Array<{ id: string; name: string }> = [];
+        const state = await workbench.repository.exportState();
+        for (const asset of packageAssets(state)) {
+          try { await workbench.artifacts.stat(asset); }
+          catch (error) {
+            if (!(error instanceof ProviderError && ['INVALID_OUTPUT', 'UNSUPPORTED_REFERENCE'].includes(error.code))) throw error;
+            missing.push({ id: asset.id, name: String(asset.metadata.name ?? asset.id) });
+          }
+        }
+        json(response, 200, { missing }); return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/project/media-recover') {
+        if (!(workbench.artifacts instanceof SeafileArtifactStore)) throw new DomainError('NOT_APPLICABLE', '媒体扫描需要 Seafile 共享存储');
+        const controller = new AbortController(); response.once('close', () => controller.abort());
+        const state = await workbench.repository.exportState();
+        json(response, 200, await workbench.artifacts.recoverMedia(packageAssets(state), controller.signal)); return;
+      }
       if (request.method === 'GET' && url.pathname === '/api/models') {
         const query = url.searchParams;
         json(response, 200, workbench.models({
@@ -302,42 +401,121 @@ function port(value: string | undefined, fallback: number): number {
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) throw new DomainError('INVALID_INPUT', '本地服务端口无效');
   return parsed;
 }
-export async function startWorkbenchServer(options: WorkbenchOptions & ApiOptions & { envPath?: string } = {}): Promise<{ server: Server; workbench: Workbench }> {
+export async function startWorkbenchServer(options: WorkbenchOptions & ApiOptions & { envPath?: string } = {}): Promise<{ server: Server; workbench: Workbench; projects?: SharedProjectCatalog; shutdown(): Promise<void> }> {
+  const portRange = options.apiPort === 0 ? undefined : await loadHostPortRange(options);
+  const apiPort = options.apiPort ?? (process.env.PIXEL_API_PORT ? port(process.env.PIXEL_API_PORT, 0) : portRange ? undefined : 4311);
+  if (apiPort !== undefined && (!Number.isInteger(apiPort) || apiPort < 0 || apiPort > 65535 || (portRange && (apiPort < portRange.start || apiPort > portRange.end)))) throw new DomainError('INVALID_INPUT', '宿主端口必须位于配置的开放范围内');
+  const frontendPort = options.frontendPort ?? port(process.env.PIXEL_PORT, 4310);
   const directory = resolve(options.directory ?? process.env.PIXEL_STORAGE_DIR ?? '.pixel');
   let runner = options.runner;
   let providers = options.providers;
   let voices = options.voices;
   const artifacts = options.artifacts ?? runner?.artifacts ?? await SeafileArtifactStore.open(await loadSeafileConfiguration(options));
-  if (artifacts instanceof SeafileArtifactStore) await migrateLegacyArtifacts(directory, artifacts);
+  let projects = options.projects;
+  let repository = options.repository;
+  let sharedJobs: SharedJobRepository | undefined;
+  let lease: SharedProjectLease | undefined;
+  if (artifacts instanceof SeafileArtifactStore) {
+    projects ??= new SharedProjectCatalog(artifacts);
+    let projectId = options.projectId;
+    if (!projectId) {
+      let legacy;
+      try { legacy = await readWorkbenchProjectFile(directory, { validateResources: false }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (legacy) {
+        projectId = await importLegacyProject(directory, artifacts, projects, legacy);
+      } else if (options.initial) {
+        projectId = options.initial.document.id;
+        try { await projects.state(projectId); }
+        catch (error) { if (!(error instanceof DomainError && error.code === 'NOT_FOUND')) throw error; await projects.create(options.initial.document.title, projectId, { version: 1, snapshot: options.initial, requests: {}, history: [], outbox: [] }); }
+      } else {
+        // A fresh host must still reach the manager when the first team project is occupied.
+        for (const candidate of (await projects.list({ limit: 20 })).items) {
+          try { lease = await SharedProjectLease.acquire(artifacts, candidate.id); projectId = candidate.id; break; }
+          catch (error) { if (!(error instanceof DomainError && error.code === 'NOT_APPLICABLE')) throw error; }
+        }
+        projectId ??= await projects.create('未命名作品');
+      }
+    }
+    try {
+      await projects.state(projectId);
+      lease ??= await SharedProjectLease.acquire(artifacts, projectId);
+      repository = await projects.repository(projectId, () => lease!.assertWritable());
+    } catch (error) { await lease?.release(); throw error; }
+    sharedJobs = new SharedJobRepository(artifacts, projectId, () => lease!.assertWritable());
+  }
   if (!runner && !providers) {
     try {
       const configuration = await loadBackendConfiguration({ storageDirectory: directory, ...(options.envPath ? { envPath: options.envPath } : {}) });
       const { createModelBackend } = await import('./runtime.js');
-      runner = createModelBackend(configuration, artifacts);
+      const modelJobs = sharedJobs ?? (artifacts instanceof FileArtifactStore ? new FileJobRepository(resolve(directory, 'jobs')) : undefined);
+      if (!modelJobs) throw new DomainError('INVALID_INPUT', '模型执行需要显式持久化任务仓库');
+      runner = createModelBackend(configuration, artifacts, modelJobs, lease ? () => lease!.assertWritable() : undefined);
       providers = { elevenlabs: true, openrouter: true };
-      voices ??= new VoiceService(new ElevenLabsVoiceProvider({ apiKey: configuration.elevenlabsApiKey }), resolve(directory, 'voice-operations'));
+      voices ??= new VoiceService(new ElevenLabsVoiceProvider({ apiKey: configuration.elevenlabsApiKey }), resolve(directory, 'voice-operations'), artifacts instanceof SeafileArtifactStore ? {
+        operations: {
+          read: async key => (await new SharedVersionedDocument(artifacts, `operations/${key}`, value => voiceOperationSchema.parse(value)).read())?.value,
+          save: async (key, value, createOnly) => {
+            const file = new SharedVersionedDocument(artifacts, `operations/${key}`, input => voiceOperationSchema.parse(input));
+            const current = await file.read();
+            if (createOnly && current) return false;
+            try { await file.publish(current, value); return true; }
+            catch (error) { if (createOnly && error instanceof DomainError && error.code === 'REVISION_CONFLICT') return false; throw error; }
+          },
+        },
+      } : {});
     } catch { providers = { elevenlabs: false, openrouter: false }; }
   }
-  const workbench = await createWorkbench({ ...options, directory, artifacts, ...(runner ? { runner } : {}), ...(providers ? { providers } : {}), ...(voices ? { voices } : {}) });
-  const apiPort = options.apiPort ?? port(process.env.PIXEL_API_PORT, 4311);
-  const frontendPort = options.frontendPort ?? port(process.env.PIXEL_PORT, 4310);
-  const server = createApiServer(workbench, { ...options, apiPort, frontendPort });
-  await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(apiPort, '127.0.0.1', () => { server.off('error', reject); accept(); }); });
-  return { server, workbench };
+  let renewing: Promise<void> | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let expiryWatchdog: ReturnType<typeof setInterval> | undefined;
+  const clearLeaseMonitoring = () => {
+    if (heartbeat) clearInterval(heartbeat);
+    if (expiryWatchdog) clearInterval(expiryWatchdog);
+  };
+  let workbench: Workbench;
+  try {
+    workbench = await createWorkbench({ ...options, directory, artifacts, ...(repository ? { repository } : {}), ...(runner ? { runner } : {}), ...(providers ? { providers } : {}), ...(voices ? { voices } : {}) }, current => {
+      if (!lease) return;
+      // Startup may consume a queued outbox; ownership monitoring starts before that work.
+      heartbeat = setInterval(() => {
+        if (renewing) return;
+        renewing = lease!.renew().catch(() => { current.close(); }).finally(() => { renewing = undefined; });
+      }, 20_000); heartbeat.unref();
+      expiryWatchdog = setInterval(() => { if (Date.now() >= lease!.expiresAt) current.close(); }, 1000); expiryWatchdog.unref();
+      if (Date.now() >= lease.expiresAt) current.close();
+    });
+  } catch (error) { clearLeaseMonitoring(); await renewing; await lease?.release(); throw error; }
+  const server = createApiServer(workbench, { ...options, ...(projects ? { projects } : {}), ...(apiPort === undefined ? {} : { apiPort }), frontendPort });
+  try { await lease?.assertWritable(); await listenInRange(server, '127.0.0.1', portRange, apiPort); }
+  catch (error) { clearLeaseMonitoring(); await renewing; await workbench.shutdown(); await lease?.release(); throw error; }
+  let stopped: Promise<void> | undefined;
+  const stop = () => stopped ??= (async () => {
+    clearLeaseMonitoring();
+    workbench.close();
+    await renewing;
+    try { await workbench.shutdown(); }
+    finally { await lease?.release(); }
+  })();
+  server.once('close', () => { void stop().catch(() => {}); });
+  const shutdown = async () => {
+    const stopping = stop();
+    const closed = server.listening ? new Promise<void>(accept => { server.close(() => accept()); server.closeAllConnections(); }) : Promise.resolve();
+    await Promise.all([stopping, closed]);
+  };
+  return { server, workbench, ...(projects ? { projects } : {}), shutdown };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  startWorkbenchServer().then(({ server, workbench }) => {
+  startWorkbenchServer().then(({ server, shutdown: stopRuntime }) => {
     const address = server.address();
+    if (process.send && typeof address === 'object' && address) process.send({ type: 'pixel.ready', port: address.port });
     console.log(`Pixel 本地宿主已启动：http://127.0.0.1:${typeof address === 'object' && address ? address.port : 4311}`);
     let stopping = false;
     const shutdown = async () => {
       if (stopping) return;
       stopping = true;
-      const tasks = workbench.shutdown();
-      const closed = new Promise<void>(accept => server.close(() => accept()));
-      server.closeAllConnections();
-      await tasks; await closed;
+      await stopRuntime();
       if (process.send) process.send({ type: 'pixel.closed' });
       if (process.connected) process.disconnect?.();
     };

@@ -84,13 +84,13 @@ ElevenLabs 的网络 fetch 拒绝会触发当前 SDK 的计时器清理缺口；
 
 Wan 使用异步视频 API：先提交，再将供应商任务 ID 通过 `checkpointProviderTask()` 持久化，随后轮询，最后使用固定的 SDK content 端点下载产物。恢复时传入已保存的 `providerTaskId`，只继续查询及下载，不重复 POST。适配器不会直接访问 OpenRouter 响应中的任意 polling / unsigned URL。[OpenRouter 异步视频 API](https://openrouter.ai/docs/api/api-reference/video-generation/create-videos)。
 
-[runtime.ts](../src/runtime.ts) 的 `GenerationRunner` 实现后端的 `run()` / `resume()`；[storage.ts](../src/storage.ts) 的 `FileJobRepository` 将请求快照、状态和远端任务 ID 保存在项目目录，生产媒体及产物索引由 [SeafileArtifactStore](../src/seafile-storage.ts) 统一保存。`MediaArtifactStore` 同时提供写入、索引、受控读取和字节范围读取；模型参考、生成产物、普通导入与人工输出共用此边界。Seafile 官方 JavaScript 客户端已经归档，当前采用隔离的 REST 适配器；`FileArtifactStore` 仅用于测试或旧资源迁移读取，不是生产回退。项目本地 ledger 面向单后端进程，用 attempt / state guard 串行更新；它自身不提供项目与 outbox 的联合事务，也不承担多进程数据库锁。工作台的 `FileWorkbenchRepository` 已原子提交项目 token 与 outbox，随后由宿主消费任务 ledger，并通过内部 Action 检查请求归属后挂载产物。
+[runtime.ts](../src/runtime.ts) 的 GenerationRunner 依赖 JobRepository执行/恢复。生产 SharedJobRepository 将捕获请求、状态和远端任务ID保存至Seafile；DurableWorkbenchRepository 原子提交项目token/回执/history/outbox，随后runner消费并经内部Action挂载。单项目lease与attempt/state guard保护竞争，FileJobRepository/FileArtifactStore仅隔离测试和旧项目只读迁移。
 
 中断任务恢复到 queued 时，`transitionJob()` 递增 attempt、清除旧运行结果并保留已持久化的远端任务 ID。已有 `providerTaskId` 且供应商支持恢复时，`TIMEOUT`、`UPSTREAM`、`RATE_LIMITED` 或 `AUTHENTICATION` 错误归为 `interrupted`，保留原任务等待显式恢复；不自动重试，也不发起新的生成 POST。没有远端 ID 的任务不会盲目恢复并再次提交。供应商已确认失败 / 取消 / 过期时返回 `REMOTE_FAILED` 并进入 `failed` 终态，不会当作可恢复中断。Grok 与 ElevenLabs 本次没有可恢复的远端任务协议。两家 provider 的本地取消均不声称供应商已经停止计费。
 
 ## 4. 后端配置与诊断
 
-`loadBackendConfiguration()` 读取后端模型配置 `ELEVENLABS_API_KEY` 与 `OPENROUTER_API_KEY`；`loadSeafileConfiguration()` 读取服务、资料库和凭证配置，两者均以进程环境变量覆盖 `.env`。资源服务需要 `SEAFILE_URL` 及 `SEAFILE_TOKEN` 或账户凭证；团队应使用 `SEAFILE_REPO_ID` 固定绑定资料库，未指定 ID 时按唯一库名查找，没有匹配才创建专用库，同名歧义明确拒绝。具体可选项见 [`.env.example`](../.env.example)。`createModelBackend()` 注册两个 provider 并接收统一资源存储；默认 `.pixel` 只承担诊断任务 ledger，媒体保存在 Seafile。资源服务配置失败或不可达时明确失败，不悄悄写入本地。凭证不进入 model descriptor、项目文件、任务请求快照、前端或日志。
+loadBackendConfiguration读取供应商密钥，loadSeafileConfiguration读取共享配置，进程环境覆盖应用.env；凭证不进项目/任务/renderer/日志。团队固定SEAFILE_REPO_ID，createModelBackend接收媒体与JobRepository，诊断backend-example也用共享任务记录，不建本地.pixel ledger。12000–12100统一范围仅约束桌面宿主loopback监听，不新增网页部署，不改SDK出站地址。SEAFILE_FILE_SERVER_URL显式映射内部文件入口、保留来源限制，见[模板](../.env.example)及[共享项目契约](shared-project-manager-and-packages.zh-CN.md)。
 
 查询模型无需生成：
 
@@ -120,14 +120,14 @@ npm run generate -- --resume JOB_ID
 
 视频参数文件可写 `{"prompt":"日落时海边的缓慢镜头","durationSeconds":5}`，设置文件可写 `{"resolution":"720p","aspectRatio":"16:9"}`。音乐 prompt 模式使用 `{"prompt":"柔和钢琴与弦乐","musicLengthMs":30000,"forceInstrumental":true}`。图像参数只需 `prompt`；省略设置时采用当前模型的默认值。再次执行生成是新的请求；`--resume` 仅用于已有远端任务的中断恢复。
 
-图片参考可重复传入 `--reference-file image.png`；诊断工具先将 PNG / JPEG / WebP 导入 Seafile 受控产物存储，再捕获引用，单图最多 25 MiB。Wan 首帧模式在参数文件中设置 `"referenceMode":"firstFrame"` 并传入恰好一张图片。`--storage-dir path` 只指定诊断任务 ledger 目录；恢复必须使用原任务所在目录和原 Seafile 配置，且不能同时替换参数、设置或引用。成功结果返回 `pixel-asset:<UUID>` 不透明句柄，不暴露媒体路径、凭证或临时下载地址。
+图片参考可重复传入 --reference-file image.png，工具先导入统一Seafile，单图25 MiB。Wan firstFrame恰好一图。--storage-dir已移除；恢复使用同库backend-example共享JobRepository，不可同时换参数/设置/引用。成功只返pixel-asset句柄，不暴露路径/凭证/临时URL。诊断命令仍不是GUI项目Action。
 
 该 CLI 是后端接入诊断工具，使用 `projectId: 'backend-example'` 与 `targetItemId: 'example-item'` 捕获 `GenerationRequest`，直接调用 `run()` / `resume()`，复用模型校验与执行内核。它不是当前 GUI 项目的 `ActionEnvelope` 入口，不将生成产物自动挂载到该项目。GUI 的 `generation.submit`、原子 outbox 和内部结果挂载已通过 `Workbench` / `ActionExecutor` 实现；正式项目 CLI / Agent 适配器仍待接线，届时必须调用同一 Action 协议，不能把诊断执行成功宣称为这些入口已经完成。
 
 ## 5. 设计哲学评审与当前证据
 
-对应设计哲学第 10 节，模型能力作用于 Timeline 默认配置、Item 生成请求、任务、产物和独立账号声纹资源。标准 GUI 路径为 Timeline 左侧单击配置、左侧右键刷新默认配置、主时间线对象上下文的同一个右键建轨命令、已有时间位置右键创建生成草稿、Item 双击编辑与右键生成。1.6 在相关详情中可见声音选择 / 克隆和原始参考文件上传控件，1.7 增加生成视频结果上传，均使用同一宿主及共享服务，不新增插件 Modal 或主工作区常驻工具。已有 Asset 拖拽仍只建立已有对象关系；原始参考文件上传登记素材并引用，人工成片上传则挂载输出，业务语义明确分开。默认仍只显示 Viewer + Timeline，素材库唯一入口仍为主 Viewer 右键；并行窗口及局部详情隔离保持 1.3 语义。旧片段保留原值、设置快照和明确刷新规则；当前评审见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)，1.6 记录保留在[声音、输入、分组与多轨预览](voices-inputs-groups-and-composition.zh-CN.md)，此前记录保留在[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)和[哲学对齐记录](philosophy-alignment.zh-CN.md)。
+对应设计哲学第 10 节，模型能力作用于 Timeline 默认配置、Item 生成请求、任务、产物和独立账号声纹资源。标准 GUI 路径为 Timeline 左侧单击配置、左侧右键刷新默认配置、主时间线对象上下文的同一个右键建轨命令、已有时间位置右键创建生成草稿、Item 双击编辑与右键生成。1.6 在相关详情中可见声音选择 / 克隆和原始参考文件上传控件，1.7 增加生成视频结果上传，均使用同一宿主及共享服务，不新增插件 Modal 或主工作区常驻工具。已有 Asset 拖拽仍只建立已有对象关系；原始参考文件上传登记素材并引用，人工成片上传则挂载输出，业务语义明确分开。默认仍只显示 Viewer + Timeline，项目管理器唯一入口仍为主 Viewer 右键；并行窗口及局部详情隔离保持 1.3 语义。旧片段保留原值、设置快照和明确刷新规则；当前评审见[共享资源与人工输出](shared-resources-and-manual-output.zh-CN.md)，1.6 记录保留在[声音、输入、分组与多轨预览](voices-inputs-groups-and-composition.zh-CN.md)，此前记录保留在[默认配置与语音连续性升级](timeline-defaults-and-speech.zh-CN.md)和[哲学对齐记录](philosophy-alignment.zh-CN.md)。
 
-`ModelRegistry`、共享引用政策与 `BaseModelProvider` 集中校验，正式项目 CLI / Agent 接线时也应复用，避免各自复制供应商规则。项目权威状态边界不变，生成任务 ledger 与 Seafile 产物存储独立于编辑历史，runner 不直接写项目；声纹 ledger 是另一类账号资源记录，不混入生成任务或项目修订。attempt、保存远端 ID 与总超时保护中断执行；工作台已在 `generation.apply` 事务内执行旧结果、含 context 的请求指纹及产物归属检查。音频后处理组合到现有 provider 流程，继承同一取消与总超时。当前基线及调整依据以设计哲学 1.7 为准；旧 Item 缺失的设置快照惰性兼容，无需清空项目，没有调用真实计费服务。
+`ModelRegistry`、共享引用政策与 `BaseModelProvider` 集中校验，正式项目 CLI / Agent 接线时也应复用，避免各自复制供应商规则。项目权威状态边界不变，生成任务 ledger 与 Seafile 产物存储独立于编辑历史，runner 不直接写项目；声纹 ledger 是另一类账号资源记录，不混入生成任务或项目修订。attempt、保存远端 ID 与总超时保护中断执行；工作台已在 `generation.apply` 事务内执行旧结果、含 context 的请求指纹及产物归属检查。音频后处理组合到现有 provider 流程，继承同一取消与总超时。当前基线及调整依据以设计哲学 1.8 为准；旧 Item 缺失的设置快照惰性兼容，无需清空项目，没有调用真实计费服务。
 
 相关自动验证覆盖 schema 默认值与未知字段、模型别名、图像 / 音频 / 视频参数隔离、真实 SDK 编码、禁用自动重试、checkpoint 顺序与远端恢复、引用最小 / 最大边界、声纹分页溢出、回执重放与未知结果、取消、超时、异常产物和脱敏错误。测试使用模拟响应，不能证明账号权限、余额、声纹身份验证结果或供应商实际生成质量；真实端到端验证按明确请求另行执行。

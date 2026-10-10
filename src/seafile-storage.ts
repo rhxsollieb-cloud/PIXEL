@@ -3,6 +3,8 @@ import { z } from 'zod';
 import type { AssetData, DeepReadonly, GenerationArtifact, JsonObject, MediaKind } from './contracts.js';
 import type { SeafileConfiguration } from './backend-configuration.js';
 import { ProviderError, type ArtifactStore, type ArtifactWriteRequest, type MediaReader } from './generation.js';
+import { DomainError } from './backend.js';
+import { SharedVersionedDocument } from './shared-projects.js';
 
 const formats: Readonly<Record<string, { extension: string; kind: MediaKind }>> = {
   'audio/mpeg': { extension: 'mp3', kind: 'audio' }, 'audio/wav': { extension: 'wav', kind: 'audio' },
@@ -35,6 +37,8 @@ function waitWithSignal<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T
 
 export interface SeafileStoreOptions { fetch?: typeof fetch }
 export interface MediaRange { start: number; end: number }
+const locationSchema = z.strictObject({ path: z.string(), objectId: objectIdSchema, sha256: z.string().regex(/^[a-f0-9]{64}$/), byteLength: z.number().int().positive().safe() });
+export interface MediaRecoveryReport { scanned: number; repaired: string[]; missing: string[] }
 
 /**
  * Seafile owns media and the artifact index. The index is published only after media upload succeeds.
@@ -89,7 +93,15 @@ export class SeafileArtifactStore implements ArtifactStore, MediaReader {
     try {
       if (typeof value !== 'string') throw new Error();
       const url = new URL(value);
-      if (!this.trustedOrigins.has(url.origin) || url.username || url.password || url.hash) throw new Error();
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error();
+      if (this.configuration.fileServerUrl) {
+        // Only rewrite links from a configured authority or the configured API hostname.
+        if (!this.trustedOrigins.has(url.origin) && url.hostname !== this.base.hostname) throw new Error();
+        const external = new URL(this.configuration.fileServerUrl);
+        if (!this.trustedOrigins.has(external.origin) || external.username || external.password || external.hash || external.search) throw new Error();
+        url.protocol = external.protocol; url.hostname = external.hostname; url.port = external.port;
+      }
+      if (!this.trustedOrigins.has(url.origin)) throw new Error();
       // Signed Seafile links stay in the backend; arbitrary links in project metadata are never used.
       if (operation === 'upload' && !url.pathname.includes('/upload-api/')) throw new Error();
       return url;
@@ -217,7 +229,7 @@ export class SeafileArtifactStore implements ArtifactStore, MediaReader {
     await waitWithSignal(pending, signal); checkSignal(signal);
   }
 
-  private async upload(directory: string, name: string, bytes: Uint8Array, mimeType: string, signal?: AbortSignal): Promise<{ id: string }> {
+  private async upload(directory: string, name: string, bytes: Uint8Array, mimeType: string, signal?: AbortSignal, exclusive = false): Promise<{ id: string }> {
     checkSignal(signal);
     const repoId = await waitWithSignal(this.repository(), signal);
     const url = this.fileUrl(await this.api(`api2/repos/${repoId}/upload-link/`, { p: directory }, {}, signal), 'upload');
@@ -229,6 +241,7 @@ export class SeafileArtifactStore implements ArtifactStore, MediaReader {
     // The link itself authorizes file-server access. Do not forward the account token to another origin.
     const parsed = z.array(z.object({ name: z.string(), id: objectIdSchema, size: z.number().int().nonnegative().safe() })).safeParse(await this.json(url, { method: 'POST', body }, signal));
     checkSignal(signal);
+    if (exclusive && parsed.success && parsed.data.length === 1 && parsed.data[0]!.name !== name) throw new DomainError('REVISION_CONFLICT', '共享项目已被其他窗口更新，请重新读取后重试');
     if (!parsed.success || parsed.data.length !== 1 || parsed.data[0]!.name !== name || parsed.data[0]!.size !== bytes.byteLength) throw invalid('Seafile 上传确认与资源不一致');
     return { id: parsed.data[0]!.id };
   }
@@ -236,6 +249,32 @@ export class SeafileArtifactStore implements ArtifactStore, MediaReader {
   private async download(path: string, maximum: number, signal?: AbortSignal): Promise<Uint8Array> {
     const url = this.fileUrl(await this.api(`api2/repos/${await this.repository()}/file/`, { p: path }, {}, signal), 'download');
     return this.request(url, {}, signal, (response, combined) => this.boundedBytes(response, maximum, combined));
+  }
+
+  /** Backend-only document transport, always confined to the configured Pixel root. */
+  private documentPath(relative: string): string {
+    if (!/^(projects|operations|locations)(\/[a-zA-Z0-9_.-]+)*$/.test(relative) || relative.split('/').some(part => part === '.' || part === '..')) throw invalid('共享文档位置无效');
+    return `${this.configuration.rootPath === '/' ? '' : this.configuration.rootPath.replace(/\/+$/, '')}/${relative}`;
+  }
+  async documentEntries(relative: string): Promise<Array<{ type: string; name: string }>> {
+    try { return await this.entries(this.documentPath(relative)); }
+    catch (error) { if (error instanceof MissingFile) return []; throw error; }
+  }
+  async readDocument(relative: string): Promise<unknown | undefined> {
+    try { return JSON.parse(new TextDecoder().decode(await this.download(this.documentPath(relative), 16 * 1024 * 1024))); }
+    catch (error) { if (error instanceof MissingFile) return undefined; if (error instanceof SyntaxError) throw invalid('共享项目文档无效'); throw error; }
+  }
+  async createDocument(relative: string, value: unknown): Promise<void> {
+    const path = this.documentPath(relative); const boundary = path.lastIndexOf('/'); const directory = path.slice(0, boundary);
+    try { await this.entries(directory); }
+    catch (error) {
+      if (!(error instanceof MissingFile)) throw error;
+      try { await this.api(`api2/repos/${await this.repository()}/dir/`, { p: directory }, { method: 'POST', body: new URLSearchParams({ operation: 'mkdir', create_parents: 'true' }) }); }
+      catch (creationError) { await this.entries(directory).catch(() => { throw creationError; }); }
+    }
+    const bytes = new TextEncoder().encode(JSON.stringify(value));
+    if (bytes.length > 16 * 1024 * 1024) throw invalid('共享项目文档超过 16 MB 上限');
+    await this.upload(directory, path.slice(boundary + 1), bytes, 'application/json', undefined, true);
   }
 
   private format(kind: MediaKind, metadata: DeepReadonly<JsonObject>) {
@@ -350,7 +389,71 @@ export class SeafileArtifactStore implements ArtifactStore, MediaReader {
       !storage.success || storage.data.repoId !== await this.repository() || storage.data.path !== `${this.mediaDirectory}/${artifactId}.${format.extension}` ||
       !Number.isSafeInteger(artifact.asset.metadata.byteLength) || Number(artifact.asset.metadata.byteLength) <= 0 || Number(artifact.asset.metadata.byteLength) > this.configuration.maxBytes ||
       typeof artifact.asset.metadata.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(artifact.asset.metadata.sha256)) throw invalid('Seafile 索引与资源句柄不一致');
+    const location = await new SharedVersionedDocument(this, `locations/${artifactId}`, value => locationSchema.parse(value)).read();
+    if (location) {
+      if (!this.safeMediaPath(location.value.path) || location.value.sha256 !== artifact.asset.metadata.sha256 || location.value.byteLength !== artifact.asset.metadata.byteLength) throw invalid('恢复位置与媒体内容身份不一致');
+      artifact.asset.metadata.storage = { ...storage.data, path: location.value.path, objectId: location.value.objectId };
+    }
     return artifact;
+  }
+
+  private safeMediaPath(path: string): boolean {
+    return path.startsWith('/') && !/[\\\x00-\x1f]/.test(path) && !path.split('/').some(part => part === '.' || part === '..') && !path.endsWith('/') && !path.includes('//');
+  }
+
+  /** Search only this configured repository. Size narrows candidates; SHA-256 proves identity. */
+  async recoverMedia(assets: readonly DeepReadonly<AssetData>[], signal: AbortSignal): Promise<MediaRecoveryReport> {
+    const report: MediaRecoveryReport = { scanned: 0, repaired: [], missing: [] };
+    const missing: Array<{ asset: DeepReadonly<AssetData>; artifact: GenerationArtifact }> = [];
+    for (const asset of assets) {
+      checkSignal(signal);
+      const artifact = await this.get(asset.id, signal);
+      if (!artifact || asset.fileRef !== `pixel-asset:${asset.id}` || artifact.asset.kind !== asset.kind || (asset.metadata.sha256 && asset.metadata.sha256 !== artifact.asset.metadata.sha256)) throw invalid('项目媒体身份与共享索引不一致');
+      try { await this.stat(asset, signal); }
+      catch (error) {
+        if (!(error instanceof MissingFile) && !(error instanceof ProviderError && error.code === 'INVALID_OUTPUT')) throw error;
+        missing.push({ asset, artifact });
+      }
+    }
+    if (!missing.length) return report;
+    const paths = ['/']; const candidates: Array<{ path: string; size: number; objectId: string }> = [];
+    const sizes = new Set(missing.map(entry => Number(entry.artifact.asset.metadata.byteLength)));
+    for (let index = 0; index < paths.length; index++) {
+      checkSignal(signal);
+      if (paths.length > 10_000 || report.scanned > 50_000) throw invalid('扫描范围超过上限，请在 Seafile 整理目录后重试');
+      const directory = paths[index]!;
+      for (const entry of await this.entries(directory, signal)) {
+        if (entry.name.includes('/') || !entry.name || entry.name === '.' || entry.name === '..') throw invalid('Seafile 扫描目录包含无效名称');
+        const path = `${directory === '/' ? '' : directory}/${entry.name}`;
+        if (!this.safeMediaPath(path)) throw invalid('Seafile 扫描位置无效');
+        if (entry.type === 'dir') { paths.push(path); continue; }
+        if (entry.type !== 'file') continue;
+        report.scanned++;
+        if (report.scanned > 50_000) throw invalid('扫描文件数超过上限');
+        const detail = fileDetailSchema.parse(await this.api(`api2/repos/${await this.repository()}/file/detail/`, { p: path }, {}, signal));
+        if (sizes.has(detail.size)) candidates.push({ path, size: detail.size, objectId: detail.id });
+      }
+    }
+    const matched = new Map<string, { path: string; size: number; objectId: string }>();
+    const wanted = new Set(missing.map(entry => String(entry.artifact.asset.metadata.sha256)));
+    for (const candidate of candidates.sort((a, b) => a.path.localeCompare(b.path))) {
+      checkSignal(signal);
+      const bytes = await this.download(candidate.path, candidate.size, signal);
+      if (bytes.length !== candidate.size) continue;
+      const hash = digest(bytes);
+      if (wanted.has(hash) && !matched.has(hash)) matched.set(hash, candidate);
+      if (matched.size === wanted.size) break;
+    }
+    for (const entry of missing) {
+      checkSignal(signal);
+      const sha256 = String(entry.artifact.asset.metadata.sha256); const found = matched.get(sha256);
+      if (!found) { report.missing.push(entry.asset.id); continue; }
+      const file = new SharedVersionedDocument(this, `locations/${entry.asset.id}`, value => locationSchema.parse(value));
+      await file.publish(await file.read(), { path: found.path, objectId: found.objectId, sha256, byteLength: found.size });
+      await this.read(entry.asset, signal);
+      report.repaired.push(entry.asset.id);
+    }
+    return report;
   }
 
   async listByJob(jobId: string): Promise<GenerationArtifact[]> {
@@ -372,10 +475,10 @@ export class SeafileArtifactStore implements ArtifactStore, MediaReader {
     const id = asset.fileRef.startsWith('pixel-asset:') ? asset.fileRef.slice('pixel-asset:'.length) : '';
     if (!z.uuid().safeParse(id).success) throw new ProviderError('UNSUPPORTED_REFERENCE', '宿主资产句柄无效');
     const artifact = await this.get(id, signal);
-    if (!artifact || artifact.asset.id !== asset.id || artifact.asset.kind !== asset.kind) throw new ProviderError('UNSUPPORTED_REFERENCE', '宿主资产句柄不存在或归属无效');
+    if (!artifact || artifact.asset.id !== asset.id || artifact.asset.kind !== asset.kind || (asset.metadata.sha256 !== undefined && asset.metadata.sha256 !== artifact.asset.metadata.sha256)) throw new ProviderError('UNSUPPORTED_REFERENCE', '宿主资产句柄不存在或归属无效');
     const storage = artifact.asset.metadata.storage as { path: string; objectId: string };
     const detail = fileDetailSchema.safeParse(await this.api(`api2/repos/${await this.repository()}/file/detail/`, { p: storage.path }, {}, signal));
-    if (!detail.success || detail.data.size !== artifact.asset.metadata.byteLength || detail.data.id !== storage.objectId || detail.data.name !== `${id}.${String(artifact.asset.metadata.extension)}`) throw invalid('Seafile 媒体已变更或与索引不一致');
+    if (!detail.success || detail.data.size !== artifact.asset.metadata.byteLength || detail.data.id !== storage.objectId || detail.data.name !== storage.path.split('/').at(-1)) throw invalid('Seafile 媒体已变更或与索引不一致');
     if (signal?.aborted) throw new ProviderError('CANCELED', 'Seafile 传输已取消');
     return artifact;
   }

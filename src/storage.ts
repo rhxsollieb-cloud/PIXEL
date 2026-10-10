@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { generationRequestSchema, type AssetData, type DeepReadonly, type GenerationArtifact, type GenerationJob } from './contracts.js';
 import { assertJobTransition, ProviderError, type ArtifactStore, type ArtifactWriteRequest, type JobRepository, type JobUpdateGuard, type MediaReader } from './generation.js';
 
-const jobSchema = z.strictObject({
+export const jobSchema = z.strictObject({
   id: z.string().min(1), request: generationRequestSchema,
   state: z.enum(['queued', 'running', 'cancelRequested', 'succeeded', 'failed', 'canceled', 'interrupted']),
   attempt: z.number().int().positive().safe(), progress: z.number().min(0).max(1),
